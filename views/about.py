@@ -43,8 +43,9 @@ st.header("Objectives")
 st.markdown(
     "1. **Design governance into the workflow:** run the Governance Guide's checks automatically on "
     "QB data and let an administrator review any flagged purchase with one click.\n"
-    "2. **Explain, with sources:** give an evidence-based explanation of each flagged pattern that "
-    "cites the official guide and glossary, so the reviewer can verify every claim.\n"
+    "2. **Explain, with sources:** an agent crew investigates each flagged pattern in the case data and "
+    "explains it with citations to the official guide and glossary, so the reviewer can verify every claim, "
+    "then answers the reviewer's follow-up questions.\n"
     "3. **Assess purchase justification at scale:** use an LLM to judge whether each item fits the "
     "stated reason for purchase, combined with an objective price comparison.\n"
     "4. **Keep humans in charge and buyers unaffected:** every output is a review aid, not a "
@@ -81,9 +82,11 @@ with uc1:
         "Two deterministic rules screen every purchase, each in its own tab. **G2B** looks for one "
         "officer's spend across the six-monthly reset of the \\$6,000 limit; **G2C** looks for several "
         "buyers in one cost centre buying the same category in a half-year. An administrator opens a "
-        "flagged case and clicks **Review and explain**. GovLens retrieves the most relevant passages "
-        "from the official Governance Guide, Data Glossary and its own rule specification, and an LLM "
-        "writes an explanation in which every citation is checked against the retrieved passages."
+        "flagged case, sees a chart of the pattern and clicks **Review and explain**. A three-agent crew "
+        "(evidence analyst, guidance researcher, report writer) queries the case with read-only tools, "
+        "searches the official Governance Guide, Data Glossary and GovLens rule specification, and writes "
+        "a report in which every citation is checked in Python. The administrator can then **ask "
+        "follow-up questions** about the case."
     )
 with uc2:
     st.subheader("2. Purchase justification")
@@ -141,12 +144,15 @@ st.header("Features")
 st.markdown(
     "| Where | Feature |\n|---|---|\n"
     "| Governance review › G2B and G2C tabs | Flagged cases by priority with score breakdown, CSV export; open a "
-    "case to see its orders and items; one-click **Review and explain** with retrieved passages and similarity "
-    "scores; reviewer disposition and notes, JSON export |\n"
+    "case to see a chart of the pattern, its orders and items; one-click **Review and explain** by an agent crew, "
+    "with the tool calls, retrieved passages and similarity scores; **Ask about this case** follow-up questions; "
+    "reviewer disposition and notes, JSON export |\n"
     "| Governance review › Purchase justification | One row per cart with a single tier and the reasons for it, "
     "filters, CSV export; AI results shipped with the app; cart detail with the AI assessment and its cited "
-    "guidance, price working, item table, reviewer notes and JSON export |\n"
-    "| Methodology | Flowcharts, prompts, data coverage, the full knowledge-base index and a retrieval check per rule |\n"
+    "guidance, price working, the dearest items each price band compares with, item table, reviewer notes and "
+    "JSON export |\n"
+    "| Methodology | Flowcharts, the agents, tools and skills, evaluation results, prompts, data coverage, the full "
+    "knowledge-base index and a retrieval check per rule |\n"
     "| Sidebar | Data source (masked sample or upload) and detection settings: days around the reset, cost-centre "
     "screening amount, shared reason words |"
 )
@@ -154,14 +160,17 @@ st.markdown(
 st.header("Guardrails")
 st.markdown(
     "- The LLM **never decides** which purchases enter the governance queue; rule tiers and scores are computed in Python.\n"
-    "- AI explanations are discarded unless every policy citation matches a retrieved passage.\n"
+    "- The agents' tools are read-only and show buyers only as Buyer A, Buyer B...; no agent can change a case.\n"
+    "- AI explanations and answers are discarded unless every policy citation matches a passage retrieved in "
+    "that run and every order cited belongs to the case (checked in Python, not by the model).\n"
     "- Purchase reasons and item descriptions are treated as untrusted text, never as instructions.\n"
     "- Language stays non-accusatory: patterns can have legitimate explanations.\n"
-    "- OpenAI requests are sent with `store=False`, and only after an administrator clicks."
+    "- OpenAI requests are sent only after an administrator clicks; CrewAI telemetry and tracing are off."
 )
 
 st.header("Project")
 st.markdown(
     "Individual capstone project (Project Type 2), AI Champions Bootcamp. "
-    "Built with Python, Streamlit, pandas, NumPy and the OpenAI API (gpt-4o-mini and text-embedding-3-small)."
+    "Built with Python, Streamlit, CrewAI, pandas, NumPy, Altair and the OpenAI API (gpt-4o-mini and "
+    "text-embedding-3-small)."
 )

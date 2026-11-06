@@ -82,3 +82,13 @@ def reviewer_notes(key: str, payload: dict, file_stem: str) -> None:
         json.dumps(record, indent=2, ensure_ascii=False, default=str).encode("utf-8"),
         file_name=f"{file_stem}.json", mime="application/json", key=f"dl-{key}",
     )
+
+
+def status_writer(status):
+    """Progress callback that writes into an st.status box, ignoring calls it cannot render."""
+    def write(message: str) -> None:
+        try:
+            status.write(message)
+        except Exception:  # e.g. called from a worker thread without a Streamlit context
+            pass
+    return write

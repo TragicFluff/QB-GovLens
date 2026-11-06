@@ -5,13 +5,28 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
+from govlens import evaluation as ev
 from govlens import justification as js
 from govlens import ui
+from govlens.crew import AGENT_SKILLS, CREW_SKILLS
 from govlens.demo import load_masked_sample
 from govlens.engine import Settings, analyse
 from govlens.flowcharts import FLOW_OVERVIEW, FLOW_UC1, FLOW_UC2
 from govlens.knowledge import load_knowledge_base
 from govlens.rag import PER_DOC, RULE_QUERIES, SYSTEM_INSTRUCTIONS
+from govlens.skills import list_skills
+
+
+@st.cache_data(show_spinner=False)
+def _justification_tiers() -> pd.DataFrame:
+    _, orders, detail, _ = analyse(*load_masked_sample(), Settings())
+    items = js.add_price_bands(js.build_items(orders, detail))
+    eligible = js.eligible_carts(items)
+    results = js.cached_results(items, eligible["Cart_ID"].tolist(), ui.CHAT_MODEL, js.ScreenCache())
+    return pd.DataFrame([
+        {"cart_id": c, "govlens_tier": js.combined_tier(items, c, str(r), results.get(c))["Tier"]}
+        for c, r in zip(eligible["Cart_ID"], eligible["Reason_For_Purchase"])
+    ])
 
 
 @st.cache_data(show_spinner=False)
@@ -24,11 +39,12 @@ def _sample_quality() -> dict:
 
 st.title("Methodology")
 st.markdown(
-    "QB GovLens combines **deterministic rules** (which decide the split-purchase flags), **retrieval-"
-    "augmented generation** over official QB guidance (which explains a flag, with verified citations), and "
-    "an **LLM judgement step** that rates purchase justification with cited guidance, bounded by deterministic "
-    "price logic and a rule minimum. Colour key in every flowchart: blue = Python, purple = LLM or "
-    "embeddings, yellow = administrator action, green = output."
+    "QB GovLens combines **deterministic rules** (which decide the split-purchase flags), an **agent crew** "
+    "built with CrewAI that investigates a flagged case with read-only tools and explains it with verified "
+    "citations from official QB guidance (retrieval-augmented generation), and an **LLM judgement step** that "
+    "rates purchase justification with cited guidance, bounded by deterministic price logic and a rule minimum. "
+    "The instructions each model follows are kept as **skills** (SKILL.md files). Colour key in every "
+    "flowchart: blue = Python, purple = LLM or embeddings, yellow = administrator action, green = output."
 )
 
 st.header("1. Overall data flow")
@@ -63,19 +79,32 @@ st.markdown(
     "material buyers in one cost centre and product category within a half financial year, together "
     "above the screening amount (\\$6,000 by default); timing, shared reasons, buyer count and recurrence "
     "raise the priority.\n\n"
+    "Each case opens with a chart for the question the rule leaves to the reviewer: for G2B, spend summed "
+    "across the reset with orders coloured where the same category was bought on both sides; for G2C, one "
+    "row per buyer across the half-year, coloured by seller, so same-day buying stands out.\n\n"
     "**Retrieval.** When the administrator clicks *Review and explain this case*, a natural-language "
     "query is built from the rule's definition, the case pattern and any shared categories. The query is "
     "embedded and compared with every passage by cosine similarity; the top "
     f"{PER_DOC['GG']} Governance Guide, {PER_DOC['DG']} Data Glossary and {PER_DOC['RS']} rule-spec "
-    "passages are kept, so each explanation draws on policy, terminology and the rule's own logic. "
-    "Without an API key, a keyword retriever is used and the sidebar says so.\n\n"
-    "**Generation and validation.** The case, its linked order and item rows, and the retrieved "
-    "passages are sent to the chat model with instructions to explain (never to re-score or accuse), "
-    "to cite each guidance claim with a passage ID and each transaction with its order ID, and to say "
-    "*'Not established by the supplied references'* when the passages do not support a claim. "
-    "GovLens then checks every cited ID against the retrieved set; if any citation is unknown or "
-    "missing, the AI text is discarded and a local evidence-only narrative is shown instead. The "
-    "retrieved passages are always displayed under the report so the reviewer can verify them."
+    "passages are kept. Without an API key, a keyword retriever is used and the sidebar says so.\n\n"
+    "**Agent crew (CrewAI).** Three agents run in sequence with `gpt-4o-mini` at temperature 0. The "
+    "**evidence analyst** queries the case with read-only tools and lists the facts that support or weaken "
+    "a single-need reading (for example, one buyer placing ten orders with one seller on one day). The "
+    "**guidance researcher** searches the knowledge base for passages that bear on those facts, on top of "
+    "the passages retrieved above. The **report writer** turns both into a five-part report: signal, "
+    "transaction evidence, relevant guidance, possible legitimate explanations, checks for the "
+    "administrator. Why a crew rather than one prompt: the single-call explanation can only be sent the "
+    "first 16 orders of a case, while G2C cases in the sample have up to 79 orders; the analyst's tools "
+    "summarise all of them, and every number the analyst uses comes from Python.\n\n"
+    "**Citation guardrail (Python, outside the LLM).** The writer's task carries a CrewAI guardrail: a Python "
+    "function that accepts the report only if every passage it cites was retrieved in this run and every "
+    "`[QB:order]` belongs to the case. If not, the writer is told what failed and tries again (at most twice). "
+    "The same check runs once more after the crew. If the crew fails, GovLens falls back to a single AI "
+    "call (same citation check), and then to a local evidence-only narrative. The tool calls, the "
+    "analyst's facts, the researcher's passages and all retrieved passages are shown under the report.\n\n"
+    "**Ask about this case.** After a review, the administrator can ask follow-up questions (for example, "
+    "*did any buyer order from the same seller on the same day?*). One agent answers with the same four "
+    "tools and the same guardrail; questions and answers are included in the downloaded review record."
 )
 with st.expander("System instructions used for the explanation"):
     st.code(SYSTEM_INSTRUCTIONS, language="text")
@@ -124,7 +153,100 @@ with st.expander("Purchase-justification prompt"):
 with st.expander("Required JSON output schema"):
     st.json(js.OUTPUT_SCHEMA)
 
-st.header("4. Data health, knowledge base and retrieval check")
+st.header("4. Agents, tools and skills")
+st.markdown(
+    "**Tools** are Python functions the agents can call. All are read-only, and none can change a case, a "
+    "tier or a score. Buyers appear only as *Buyer A, Buyer B...* (ordered by spend), never by e-mail."
+)
+st.dataframe(
+    pd.DataFrame([
+        ("case_overview", "Evidence analyst, Q&A", "Rule, priority, score breakdown, dates, totals, buyers with totals"),
+        ("list_orders", "Evidence analyst, Q&A", "Up to 40 orders, filtered by buyer, seller, category, side of the reset or dates"),
+        ("summarise_orders", "Evidence analyst, Q&A", "Totals and counts for all orders grouped by buyer, seller, date, week, month, category or side"),
+        ("search_guidance", "Guidance researcher, Q&A", "Searches the GG, DG and RS passages; returns citation IDs"),
+    ], columns=["Tool", "Used by", "Returns"]),
+    hide_index=True, use_container_width=True,
+)
+st.markdown(
+    "**Skills** are the instructions each model follows, kept as `skills/<name>/SKILL.md` files in the open "
+    "Agent Skills format (a name and description, then Markdown instructions). Skills shape how an agent "
+    "works; tools let it act. CrewAI normally shows an agent only a skill's description and lets it decide "
+    "whether to load the rest; GovLens loads every skill in full, so each run follows the same instructions. "
+    "The citation skill is attached to the whole crew; the others to one agent each. The "
+    "purchase-justification screen is a single structured call, not a crew, and reads its skill file "
+    "directly as its system prompt."
+)
+_owners = {name: role for role, names in AGENT_SKILLS.items() for name in names}
+_owners.update({name: "whole crew" for name in CREW_SKILLS})
+_owners["govlens-purchase-justification"] = "purchase-justification screen"
+_roles = {"analyst": "Evidence analyst", "researcher": "Guidance researcher", "writer": "Report writer",
+          "qa": "Case Q&A agent"}
+_skills = list_skills()
+st.dataframe(
+    pd.DataFrame([
+        {"Skill": s.name, "Attached to": _roles.get(_owners.get(s.name, ""), _owners.get(s.name, "")),
+         "Version": s.version, "What it is for": s.description}
+        for s in _skills
+    ]),
+    hide_index=True, use_container_width=True,
+)
+for skill in _skills:
+    if skill.name == "govlens-purchase-justification":
+        continue  # shown in section 3
+    with st.expander(f"{skill.name}/SKILL.md"):
+        st.markdown(ui.md(skill.body))
+
+st.header("5. Evaluation")
+st.markdown(
+    "**Retrieval** is checked in section 6: each rule's query should retrieve the matching Governance Guide "
+    "check. **Case reviews** are evaluated with `scripts/evaluate_reviews.py`, which runs the crew and the "
+    "single-call explanation on every G2B and G2C case and records whether each passed the citation check, "
+    "how long it took and how many dollar figures in the text cannot be traced to the data the model was "
+    "given (a proxy for invented numbers). It also writes both reports as *Report A* and *Report B* in random "
+    "order for blind rating. **Purchase justification** is evaluated with `scripts/evaluate_justification.py`: "
+    "a reviewer gives their own tier for 12 carts sampled across tiers, without seeing GovLens's tier, and "
+    "agreement is computed."
+)
+runs = ev.read_csv(ev.REVIEW_RUNS)
+if runs is not None and not runs.empty:
+    numeric = runs.assign(**{c: pd.to_numeric(runs[c], errors="coerce") for c in
+                             ("seconds", "untraceable_amounts", "total_tokens", "tool_calls")},
+                          passed=runs["passed"].str.lower().eq("true"))
+    summary = numeric.groupby("engine").agg(
+        cases=("case_id", "nunique"), passed_citation_check=("passed", "mean"),
+        median_seconds=("seconds", "median"), untraceable_dollar_figures=("untraceable_amounts", "sum"),
+        median_tool_calls=("tool_calls", "median"),
+    ).reset_index()
+    summary["passed_citation_check"] = (summary["passed_citation_check"] * 100).round(0).astype(int).astype(str) + "%"
+    st.markdown("**Case reviews: automatic checks**")
+    st.dataframe(summary.rename(columns={"engine": "Engine"}), hide_index=True, use_container_width=True)
+    labels = ev.read_csv(ev.REVIEW_LABELS)
+    if labels is not None and (labels.get("useful_1_to_5", pd.Series(dtype=str)) != "").any():
+        rated = labels[labels["useful_1_to_5"] != ""].merge(
+            runs[["case_id", "engine", "blind_label"]].rename(columns={"blind_label": "report"}), on=["case_id", "report"])
+        rated["useful"] = pd.to_numeric(rated["useful_1_to_5"], errors="coerce")
+        rated["facts_correct"] = rated["facts_correct_Y_N"].str.upper().eq("Y")
+        st.markdown("**Case reviews: blind ratings by a QB reviewer**")
+        st.dataframe(rated.groupby("engine").agg(reports=("case_id", "size"), facts_correct=("facts_correct", "mean"),
+                                                 mean_usefulness=("useful", "mean")).round(2).reset_index(),
+                     hide_index=True, use_container_width=True)
+else:
+    st.info("Case-review evaluation has not been run yet: `python scripts/evaluate_reviews.py` (needs an API key).")
+jl = ev.read_csv(ev.JUSTIFICATION_LABELS)
+if jl is not None and (jl.get("your_tier", pd.Series(dtype=str)).isin(ev.TIERS)).any():
+    ai_tiers = _justification_tiers()
+    result = ev.agreement(jl.merge(ai_tiers, on="cart_id", how="left"))
+    st.markdown(
+        f"**Purchase justification: agreement with a QB reviewer** ({result['labelled']} carts, blind). "
+        f"Exact agreement {result['exact_agreement']:.0%}; GovLens higher than the reviewer on "
+        f"{result['govlens_higher']}, lower on {result['govlens_lower']}."
+    )
+    st.dataframe(pd.DataFrame(result["confusion"]).T.rename_axis("Reviewer tier (rows) vs GovLens tier (columns)"),
+                 use_container_width=True)
+else:
+    st.info("Purchase-justification labels are not filled in yet (`evaluation/justification_labels.csv`).")
+
+st.header("6. Data health, knowledge base and retrieval check")
 quality = _sample_quality()
 if quality:
     labels = {
@@ -162,39 +284,51 @@ for rule_id, query in RULE_QUERIES.items():
     })
 st.dataframe(pd.DataFrame(check_rows), hide_index=True, use_container_width=True)
 
-st.header("5. Implementation details")
+st.header("7. Implementation details")
 st.dataframe(
     pd.DataFrame([
         ("app.py", "Sign-in gate and page navigation"),
         ("views/review.py", "Main page: G2B, G2C and Purchase justification tabs"),
         ("govlens/engine.py", "Data normalisation and the G2B, G2C and REASON rules"),
         ("govlens/knowledge.py", "Knowledge-base parser, embeddings, local vector store, keyword fallback"),
-        ("govlens/rag.py", "Retrieval queries, explanation prompt, citation validation"),
+        ("govlens/rag.py", "Retrieval queries, single-call explanation prompt, citation validation"),
+        ("govlens/crew.py", "CrewAI review crew and Q&A agent, tools, citation guardrail, telemetry off"),
+        ("govlens/casefacts.py", "Read-only views of one case for the agent tools (buyers as Buyer A, B...)"),
+        ("govlens/skills.py", "Reads the SKILL.md files; loads them into CrewAI agents"),
+        ("skills/*/SKILL.md", "The six skills: instructions for each agent and for the justification screen"),
+        ("govlens/charts.py", "G2B and G2C charts; the price comparison table"),
+        ("govlens/evaluation.py, scripts/evaluate_*.py", "Evaluation of case reviews and of the justification tier"),
         ("govlens/justification.py", "Price bands, justification prompt and schema, combined tier, results cache"),
         ("scripts/precompute_ai_screen.py", "Runs the AI assessment for the sample and saves results shipped with the app"),
         ("govlens/ui.py", "Shared page helpers: models, API key, retriever, reviewer notes"),
         ("knowledge_base/*.md", "Curated Governance Guide, Data Glossary and rule specification"),
         ("scripts/build_glossary_kb.py", "Rebuilds the glossary passages from the official .xlsx"),
-        ("tests/", "Automated tests for rules, retrieval, citation checks, the AI screen and the pages"),
+        ("tests/", "Automated tests for rules, retrieval, citation checks, the AI screen, the crew, charts and pages"),
     ], columns=["Module", "Responsibility"]),
     hide_index=True, use_container_width=True,
 )
 st.markdown(
-    f"**LLM settings.** Chat model `{ui.CHAT_MODEL}` via the OpenAI Responses API; temperature 0 and a "
-    "strict JSON schema for the AI screen; bounded output length; `store=False` on every request. "
+    f"**LLM settings.** Chat model `{ui.CHAT_MODEL}`: the AI screen and the single-call explanation use the "
+    "OpenAI Responses API with `store=False`; the crew uses CrewAI's OpenAI connector (Chat Completions, which "
+    "OpenAI does not store by default). Temperature 0 throughout; strict JSON schema for the AI screen. "
+    "CrewAI's telemetry and tracing are switched off, and the task outputs it keeps on disk are cleared "
+    "after each run. "
     f"Embeddings use `{ui.EMBEDDING_MODEL}`. Both are fixed in code.\n\n"
     "**Prompt-engineering techniques.** Role and task framing; delimited JSON inputs; explicit output "
     "structure (headings for explanations, JSON schema for the screen); worked examples of "
     "function-versus-marketing reasoning; instructions to treat buyer and seller text as untrusted "
-    "data; and a two-stage chain in each use case: retrieval then grounded generation then citation "
-    "check (use case 1), and retrieval then LLM judgement with citations then deterministic escalation and rule minimum (use case 2).\n\n"
+    "data; role-specific agents with their own skills and tools; and a chain in each use case: retrieval, "
+    "tool-based analysis, grounded writing and a Python citation guardrail (use case 1), and retrieval, "
+    "LLM judgement with citations, then deterministic escalation and rule minimum (use case 2).\n\n"
     "**Testing.** Automated tests cover the rule edge cases (thresholds, agency separation, cancelled "
     "and welfare exclusions, no double counting), retrieval of the right guidance for each rule, "
     "vector-store caching, rejection of invented citations, price-band and escalation maths, the "
-    "JSON-schema and citation contract, the combined tier and its minimum, the sign-in gate and the page layout."
+    "JSON-schema and citation contract, the combined tier and its minimum, the sign-in gate and the page layout. "
+    "The crew is tested offline with a scripted model, so CrewAI really parses its tool calls, runs the tools, "
+    "loads the skills and applies the guardrail without an API key."
 )
 
-st.header("6. Limitations")
+st.header("8. Limitations")
 st.markdown(
     "- Masked historical exports stand in for a real-time QB feed; there is no live integration.\n"
     "- Rule thresholds are screening heuristics. The 1 April / 1 October reset dates are a GovLens "
@@ -203,5 +337,8 @@ st.markdown(
     "- Product categories are broad marketplace labels, so price bands can compare dissimilar items.\n"
     "- LLM judgements can be wrong (for example, inferring a purpose the reason does not state). They are "
     "shown with the reasons behind each tier and require human review.\n"
+    "- The crew makes several model calls per review (about 20 to 60 seconds) and adds CrewAI and its "
+    "dependencies to the app. The citation guardrail checks that sources are real and relevant to the run, "
+    "not that every sentence is a fair reading of them.\n"
     "- No user roles, agency access control or audit trail; a single hardcoded login protects the prototype."
 )

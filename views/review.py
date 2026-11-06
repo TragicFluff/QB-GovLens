@@ -11,10 +11,13 @@ import io
 import pandas as pd
 import streamlit as st
 
+from govlens import charts
+from govlens import crew
 from govlens import justification as js
 from govlens import ui
 from govlens.demo import load_masked_sample
 from govlens.engine import Settings, analyse, case_items, case_orders
+from govlens.knowledge import CITATION_RE
 from govlens.rag import deterministic_explanation, openai_explanation, retrieve
 from govlens.ui_text import DISCLAIMER
 
@@ -77,10 +80,12 @@ with st.sidebar:
     st.header("AI")
     api_key = ui.api_key()
     retriever, kb_fp = ui.retriever(api_key)
+    CREW_ON = bool(api_key) and crew.available()
     if api_key:
         st.caption(
             f"Models: {ui.CHAT_MODEL} (explanations and AI screen), {ui.EMBEDDING_MODEL} (retrieval). "
-            f"Retrieval: {retriever.description}."
+            f"Retrieval: {retriever.description}. "
+            + ("Case reviews use the CrewAI agent crew." if CREW_ON else "CrewAI is not installed: case reviews use one AI call.")
         )
     else:
         st.warning("OPENAI_API_KEY not set: keyword retrieval only; AI explanations and the AI screen are off.")
@@ -200,8 +205,13 @@ def case_tab(rule_id: str, intro: str) -> None:
         f"({case['Score_Breakdown']}) | Rule version: {case['Rule_Version']}"
     )
     st.markdown(ui.md(f"**Evidence:** {case['Evidence_Summary']}"))
-    st.markdown("**Orders in this case**")
     linked = case_orders(case, orders)
+    linked_items = case_items(case, item_detail)
+    if rule_id == "G2B":
+        st.altair_chart(charts.g2b_reset_chart(case, linked, linked_items, OFFICER_CAP), use_container_width=True)
+    elif rule_id == "G2C":
+        st.altair_chart(charts.g2c_buyer_timeline(case, linked_items), use_container_width=True)
+    st.markdown("**Orders in this case**")
     linked = linked.assign(Order_Date=linked["Event_Date"].dt.date)
     st.dataframe(
         linked[[
@@ -211,7 +221,7 @@ def case_tab(rule_id: str, intro: str) -> None:
     )
     with st.expander("Items in this case"):
         st.dataframe(
-            case_items(case, item_detail)[[
+            linked_items[[
                 "Order_ID", "Buyer_Corporate_Email", "Cost_Centre_Effective", "Product_Category",
                 "Amount_After_Discount", "Item_Desc",
             ]], hide_index=True, use_container_width=True,
@@ -220,35 +230,119 @@ def case_tab(rule_id: str, intro: str) -> None:
     state_key = f"review-{rule_id}"
     report_key = (case_id, raw_fingerprint, kb_fp, settings, bool(api_key), retriever.method)
     if st.button("Review and explain this case", type="primary", key=f"{rule_id}-review"):
-        hits = retrieve(retriever, case)
-        passages = [h.passage for h in hits]
-        narrative = deterministic_explanation(case)
-        note = f"Local explanation (no OpenAI key). Retrieval: {retriever.description}."
-        if api_key and passages:
-            try:
-                narrative = openai_explanation(case, orders, item_detail, passages, api_key, model=ui.CHAT_MODEL)
-                note = (f"AI-written explanation ({ui.CHAT_MODEL}); every citation verified against the "
-                        f"retrieved passages. Retrieval: {retriever.description}.")
-            except Exception as exc:
-                note = f"AI did not return a verified explanation ({exc}); showing the local explanation. Retrieval: {retriever.description}."
-        st.session_state[state_key] = {"key": report_key, "case_id": case_id, "narrative": narrative,
-                                       "hits": hits, "note": note}
+        st.session_state[state_key] = run_review(case, case_id, report_key)
     latest = st.session_state.get(state_key)
     if latest and latest["key"] == report_key:
-        st.divider()
-        st.subheader("Review report")
-        st.markdown(ui.md(latest["narrative"]))
-        st.caption(latest["note"])
-        if latest["hits"]:
-            with st.expander("Retrieved knowledge-base passages (check citations here)", expanded=True):
-                ui.show_hits(latest["hits"])
-        ui.reviewer_notes(
-            case_id,
-            {"case": {k: str(v) for k, v in case.items()}, "explanation": latest["narrative"],
-             "source_passage_ids": [h.passage.citation for h in latest["hits"]],
-             "retrieval": retriever.description, "knowledge_base_fingerprint": kb_fp},
-            f"govlens_review_{case_id}",
+        show_review(case, case_id, latest)
+
+
+def run_review(case: pd.Series, case_id: str, report_key: tuple) -> dict:
+    """Crew first (if available), then a single AI call, then the local explanation."""
+    hits = retrieve(retriever, case)
+    passages = [h.passage for h in hits]
+    result = {"key": report_key, "case_id": case_id, "narrative": deterministic_explanation(case),
+              "hits": hits, "engine": "local", "crew": None,
+              "note": f"Local explanation (no OpenAI key). Retrieval: {retriever.description}."}
+    if not (api_key and passages):
+        return result
+    crew_problem = ""
+    if CREW_ON:
+        with st.status("Agent crew: evidence analyst, then guidance researcher, then report writer",
+                       expanded=True) as status:
+            try:
+                run = crew.review_case(case, orders, item_detail, retriever, api_key, ui.CHAT_MODEL,
+                                       baseline_hits=hits, progress=ui.status_writer(status))
+                status.update(label=f"Crew finished in {run.seconds:.0f}s", state="complete", expanded=False)
+                tokens = f", {run.tokens['total_tokens']:,} tokens" if run.tokens.get("total_tokens") else ""
+                return {**result, "narrative": run.text, "hits": run.hits, "engine": "crew", "crew": run,
+                        "note": (f"Written by a three-agent CrewAI crew ({ui.CHAT_MODEL}) in {run.seconds:.0f}s with "
+                                 f"{len(run.tool_calls)} tool calls{tokens}. Every citation was checked against "
+                                 f"the passages retrieved in this run. Retrieval: {retriever.description}.")}
+            except Exception as exc:
+                crew_problem = f"The crew did not return a verified report ({str(exc)[:200]}). "
+                status.update(label="Crew did not return a verified report; using a single AI call",
+                              state="error", expanded=False)
+    try:
+        narrative = openai_explanation(case, orders, item_detail, passages, api_key, model=ui.CHAT_MODEL)
+        return {**result, "narrative": narrative, "engine": "single",
+                "note": (f"{crew_problem}AI-written explanation (one {ui.CHAT_MODEL} call); every citation verified "
+                         f"against the retrieved passages. Retrieval: {retriever.description}.")}
+    except Exception as exc:
+        result["note"] = (f"{crew_problem}AI did not return a verified explanation ({exc}); showing the local "
+                          f"explanation. Retrieval: {retriever.description}.")
+        return result
+
+
+def show_review(case: pd.Series, case_id: str, latest: dict) -> None:
+    st.divider()
+    st.subheader("Review report")
+    st.markdown(ui.md(latest["narrative"]))
+    st.caption(latest["note"])
+    run = latest.get("crew")
+    if run is not None:
+        with st.expander(f"How the crew worked ({len(run.tool_calls)} tool calls, {run.seconds:.0f}s)"):
+            st.markdown("**Tool calls, in order**")
+            st.markdown("\n".join(
+                f"{i}. `{c['tool']}` " + ", ".join(f"{k} = {v}" for k, v in c["args"].items())
+                for i, c in enumerate(run.tool_calls, 1)
+            ) or "None")
+            for step, title in zip(run.steps, ["Evidence analyst: facts", "Guidance researcher: passages"]):
+                st.markdown(f"**{title}**")
+                st.markdown(ui.md(step["output"]))
+    if latest["hits"]:
+        cited = {c for c in CITATION_RE.findall(latest["narrative"])}
+        label = ("Knowledge-base passages retrieved in this run (check citations here)"
+                 + (f"; {len(cited)} cited" if cited else ""))
+        with st.expander(label, expanded=run is None):
+            ui.show_hits(sorted(latest["hits"], key=lambda h: h.passage.citation not in cited))
+    qa = ask_about_case(case, case_id, latest)
+    ui.reviewer_notes(
+        case_id,
+        {"case": {k: str(v) for k, v in case.items()}, "explanation": latest["narrative"],
+         "explanation_engine": latest.get("engine", ""),
+         "agent_tool_calls": run.tool_calls if run is not None else [],
+         "follow_up_questions": [{"question": q["question"], "answer": q["answer"]} for q in qa],
+         "source_passage_ids": [h.passage.citation for h in latest["hits"]],
+         "retrieval": retriever.description, "knowledge_base_fingerprint": kb_fp},
+        f"govlens_review_{case_id}",
+    )
+
+
+def ask_about_case(case: pd.Series, case_id: str, latest: dict) -> list[dict]:
+    """Follow-up questions answered by a tool-using agent; returns this case's Q&A history."""
+    history_key = f"qa-{case_id}-{latest['key'][1]}"
+    history: list[dict] = st.session_state.setdefault(history_key, [])
+    st.markdown("**Ask about this case**")
+    if not CREW_ON:
+        st.caption("Follow-up questions use the agent crew, which needs an OpenAI key and CrewAI installed.")
+        return history
+    for item in history:
+        st.markdown(ui.md(f"**Q:** {item['question']}"))
+        st.markdown(ui.md(item["answer"]))
+        st.caption(item["note"])
+    with st.form(f"qa-form-{case_id}", clear_on_submit=True):
+        question = st.text_input(
+            "Question", max_chars=crew.MAX_QUESTION_CHARS, label_visibility="collapsed",
+            placeholder="E.g. Did any buyer order from the same seller on the same day?",
         )
+        asked = st.form_submit_button("Ask")
+    if asked and question.strip():
+        with st.status("Case Q&A agent is checking the data and guidance", expanded=True) as status:
+            try:
+                run = crew.answer_question(
+                    question, case, orders, item_detail, retriever, api_key, ui.CHAT_MODEL,
+                    baseline_hits=latest["hits"], history=[(h["question"], h["answer"]) for h in history],
+                    progress=ui.status_writer(status),
+                )
+                status.update(label=f"Answered in {run.seconds:.0f}s", state="complete", expanded=False)
+                history.append({"question": question, "answer": run.text,
+                                "note": f"{len(run.tool_calls)} tool call{'' if len(run.tool_calls) == 1 else 's'}; citations checked."})
+                st.rerun()
+            except Exception as exc:
+                status.update(label="No verified answer", state="error", expanded=True)
+                st.warning(f"The agent could not give an answer that passed the citation check ({str(exc)[:200]}). "
+                           "Try rephrasing the question.")
+    return history
 
 
 g2b_tab, g2c_tab, pj_tab = st.tabs([
@@ -356,6 +450,20 @@ with pj_tab:
                      "Price_Band", "Peer_Count", "AI_Base_Level", "Escalated_By", "Final_Level",
                      "Core_Function", "AI_Rationale"]
         st.dataframe(item_rows[[c for c in item_cols if c in item_rows.columns]], hide_index=True, use_container_width=True)
+        escalated = ai_items[(ai_items["Cart_ID_Effective"] == cart_id) & (ai_items["Price_Escalation"] > 0)]
+        if not escalated.empty:
+            with st.expander(f"What the price bands compare with ({len(escalated)} item(s) raised on price)", expanded=True):
+                st.caption(
+                    "Product categories are broad marketplace labels. If the dearest items below are not like the "
+                    "item, the price escalation rests on a weak comparison."
+                )
+                for _, item in escalated.iterrows():
+                    st.markdown(ui.md(
+                        f"**{item['Item_Ref']} · {item['Product_Category']}:** {str(item['Item_Desc'])[:90]} at "
+                        f"${item['Unit_Price_After_Discount']:,.2f} ({item['Price_Band']}; {item['Peer_Count']} "
+                        "comparison records). Dearest items it is compared with:"
+                    ))
+                    st.dataframe(charts.dearest_comparisons(item, ai_items), hide_index=True, use_container_width=True)
         knowledge_by_id = {p.citation: p for p in retriever.passages}
         cited = [knowledge_by_id[c] for c in (record or {}).get("citations", []) if c in knowledge_by_id]
         if cited:

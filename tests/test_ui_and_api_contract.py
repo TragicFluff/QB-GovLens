@@ -52,7 +52,7 @@ def fake_streamlit(review_button=True):
     module.secrets = Secrets()
     module.cache_resource = _cache_decorator
     module.cache_data = _cache_decorator
-    call_counts = {"review": 0, "radio": [], "number_input": [], "slider": [], "dataframes": [], "tabs": []}
+    call_counts = {"review": 0, "radio": [], "number_input": [], "slider": [], "dataframes": [], "tabs": [], "charts": []}
 
     def noop(*args, **kwargs):
         return None
@@ -64,6 +64,7 @@ def fake_streamlit(review_button=True):
     ]:
         setattr(module, fn, noop)
     module.dataframe = lambda data, *a, **k: call_counts["dataframes"].append(data)
+    module.altair_chart = lambda chart, *a, **k: call_counts["charts"].append(chart.to_dict())
     module.form = lambda *a, **k: Ctx()
     module.form_submit_button = lambda *a, **k: False
     module.rerun = noop
@@ -127,6 +128,8 @@ def test_main_page_has_one_tab_per_check_and_reviews_cases(monkeypatch):
         assert review["case_id"].startswith("GL-")
         assert "transaction IDs" in review["narrative"]
         assert {h.passage.doc for h in review["hits"]} == {"GG", "DG", "RS"}
+    titles = [c["title"]["text"] for c in counts["charts"]]
+    assert titles == ["Spend before and after the reset", "Who bought, when, and from which seller"]
 
 
 def test_sidebar_has_no_fictitious_data_or_officer_cap_setting(monkeypatch):
@@ -209,6 +212,34 @@ def test_credential_script_rewrites_username_and_password(tmp_path):
 def test_documentation_pages_render(monkeypatch, page):
     fake, _ = fake_streamlit()
     run_page(monkeypatch, fake, APP_DIR / "views" / page)
+
+
+def test_methodology_shows_evaluation_results_when_present(monkeypatch, tmp_path):
+    """With filled-in evaluation files, the Methodology page builds its result tables."""
+    import pandas as pd
+    from govlens import evaluation as ev
+    runs = pd.DataFrame([
+        {"case_id": "GL-1", "rule": "G2C", "engine": "crew", "passed": True, "seconds": 30, "tool_calls": 5,
+         "untraceable_amounts": 0, "total_tokens": 9000, "blind_label": "A"},
+        {"case_id": "GL-1", "rule": "G2C", "engine": "single", "passed": True, "seconds": 6, "tool_calls": 0,
+         "untraceable_amounts": 2, "total_tokens": "", "blind_label": "B"},
+    ])
+    labels = pd.DataFrame([{"case_id": "GL-1", "report": "A", "facts_correct_Y_N": "Y", "useful_1_to_5": "4", "note": ""},
+                           {"case_id": "GL-1", "report": "B", "facts_correct_Y_N": "N", "useful_1_to_5": "2", "note": ""}])
+    for name, frame in (("REVIEW_RUNS", runs), ("REVIEW_LABELS", labels)):
+        path = tmp_path / f"{name}.csv"
+        frame.to_csv(path, index=False)
+        monkeypatch.setattr(ev, name, path)
+    carts = pd.read_csv(ev.JUSTIFICATION_LABELS, encoding="utf-8-sig", dtype=str, keep_default_na=False)
+    carts["your_tier"] = ["High", "Medium", "Low"] * (len(carts) // 3) + ["Medium"] * (len(carts) % 3)
+    jl = tmp_path / "jl.csv"
+    carts.to_csv(jl, index=False)
+    monkeypatch.setattr(ev, "JUSTIFICATION_LABELS", jl)
+    fake, counts = fake_streamlit()
+    run_page(monkeypatch, fake, APP_DIR / "views" / "methodology.py")
+    tables = [d for d in counts["dataframes"] if hasattr(d, "columns")]
+    assert any("untraceable_dollar_figures" in t.columns for t in tables)
+    assert any("mean_usefulness" in t.columns for t in tables)
 
 
 def test_main_page_shows_required_disclaimer():

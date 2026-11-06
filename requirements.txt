@@ -1,6 +1,11 @@
 streamlit>=1.40,<2
 pandas>=2.0,<4
 numpy>=1.26,<3
-openai>=1.80,<4
+altair>=5,<7
+pyyaml>=6,<7
+# CrewAI 1.15 needs openai 2.x and Python 3.10-3.13. On Python 3.14 it is skipped and
+# case reviews fall back to a single AI call.
+openai>=2.30,<3
+crewai==1.15.36; python_version < "3.14"
 pytest>=8,<10
 openpyxl>=3.1,<4
