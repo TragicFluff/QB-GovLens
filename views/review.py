@@ -1,4 +1,4 @@
-"""Main page: Governance review with one tab per check (G2B, G2C, Reason & justification).
+"""Main page: Governance review with one tab per check (G2B, G2C, Purchase justification).
 
 Loaded by app.py after sign-in. Uses masked/desensitised data only.
 """
@@ -20,15 +20,8 @@ from govlens.ui_text import DISCLAIMER
 
 SOURCES = ["Masked QB sample (built-in)", "Upload QB CSV exports"]
 OFFICER_CAP = 6000.0  # QB's system-enforced spend limit per officer per 6-month period
-REASON_LABELS = {
-    "Uninformative purchase reason": "Vague reason",
-    "Possible offline approval reference": "Approval keyword",
-    "Vague reason and possible offline approval reference": "Vague + approval keyword",
-}
-RULE_FLAG_OPTIONS = ["Vague + approval keyword", "Approval keyword", "Vague reason", "None"]
-AI_TIER_OPTIONS = ["High", "Medium", "Uncertain", "Low", "Not screened", "Out of scope (#welfare)"]
-AI_ORDER = {t: i for i, t in enumerate(AI_TIER_OPTIONS)}
-RULE_ORDER = {"Medium": 0, "Low": 1, "": 2}
+TIER_ORDER_PJ = {t: i for i, t in enumerate(js.TIER_OPTIONS)}
+LEVEL_ORDER = {lvl: -i for i, lvl in enumerate(js.LEVELS)}
 
 st.title("QB GovLens")
 st.caption("Governance review for QuickBuy@SGov agency administrators")
@@ -126,7 +119,7 @@ agency_cases = agency_cases[
 ].copy()
 agency_orders = agency_orders[agency_orders["FY"].astype(str).isin(selected_fys)].copy()
 
-# --------------------------------------------- reason & justification data
+# ------------------------------------------------- purchase justification data
 ai_items = js.add_price_bands(js.build_items(orders, item_detail))
 ai_eligible = js.eligible_carts(ai_items)
 ai_eligible = ai_eligible[ai_eligible["Cart_ID"].isin(agency_orders["Cart_ID_Effective"])]
@@ -134,51 +127,37 @@ ai_cache = js.ScreenCache()
 ai_results = js.cached_results(ai_items, ai_eligible["Cart_ID"].tolist(), ui.CHAT_MODEL, ai_cache)
 
 
-def reason_table() -> pd.DataFrame:
-    """One row per cart: deterministic REASON flag and AI-suggested tier, side by side."""
-    base = (
+def justification_table() -> pd.DataFrame:
+    """One row per cart with a single purchase-justification tier and the reasons for it."""
+    carts_view = (
         agency_orders.groupby("Cart_ID_Effective", as_index=False)
         .agg(Date=("Event_Date", "min"), Reason_For_Purchase=("Reason_For_Purchase", "first"),
              Cart_Total=("Total_Amt_Payable", "sum"))
         .rename(columns={"Cart_ID_Effective": "Cart_ID"})
     )
-    reason_cases = agency_cases[agency_cases["Rule_ID"] == "REASON"].set_index("Evidence_Cart_IDs")
-    base["Rule_Flag"] = base["Cart_ID"].map(reason_cases["Pattern"].map(REASON_LABELS)).fillna("None")
-    base["Rule_Tier"] = base["Cart_ID"].map(reason_cases["Risk_Tier"]).fillna("")
-    base["Rule_Keywords"] = base["Cart_ID"].map(reason_cases["Reason_Overlap"]).fillna("")
-    screened = js.results_table(ai_items, {c: ai_results[c] for c in ai_eligible["Cart_ID"] if c in ai_results})
-    screened = screened.set_index("Cart_ID") if not screened.empty else pd.DataFrame()
     eligible = set(ai_eligible["Cart_ID"])
-
-    def ai_tier(cart_id: str) -> str:
-        if cart_id not in eligible:
-            return "Out of scope (#welfare)"
-        if not screened.empty and cart_id in screened.index:
-            return screened.at[cart_id, "Display_Tier"]
-        return "Not screened"
-
-    base["AI_Tier"] = base["Cart_ID"].map(ai_tier)
-    for target, source, default in [
-        ("AI_Five_Level", "Risk_Level", ""), ("AI_Base_Level", "AI_Base_Level", ""),
-        ("AI_Price_Escalated", "Price_Escalated", False), ("AI_Summary", "Assessment_Summary", ""),
-    ]:
-        base[target] = base["Cart_ID"].map(screened[source]).fillna(default) if not screened.empty else default
-    base["Date"] = pd.to_datetime(base["Date"]).dt.date
-    base["_ai"] = base["AI_Tier"].map(AI_ORDER)
-    base["_rule"] = base["Rule_Tier"].map(RULE_ORDER)
-    return base.sort_values(["_ai", "_rule", "Cart_Total"], ascending=[True, True, False]).drop(columns=["_ai", "_rule"])
+    rows = [
+        js.combined_tier(ai_items, r["Cart_ID"], str(r["Reason_For_Purchase"] or ""),
+                         ai_results.get(r["Cart_ID"]), in_scope=r["Cart_ID"] in eligible)
+        for _, r in carts_view.iterrows()
+    ]
+    table = carts_view.merge(pd.DataFrame(rows).drop(columns="Reason_For_Purchase"), on="Cart_ID", how="left")
+    table["Date"] = pd.to_datetime(table["Date"]).dt.date
+    table["_t"] = table["Tier"].map(TIER_ORDER_PJ)
+    table["_l"] = table["Level"].map(LEVEL_ORDER).fillna(1)
+    return table.sort_values(["_t", "_l", "Cart_Total"], ascending=[True, True, False]).drop(columns=["_t", "_l"])
 
 
-reasons = reason_table()
+justified = justification_table()
 
 k1, k2, k3, k4 = st.columns(4)
 k1.metric("G2B cases", f"{(agency_cases['Rule_ID'] == 'G2B').sum():,}")
 k2.metric("G2C cases", f"{(agency_cases['Rule_ID'] == 'G2C').sum():,}")
-k3.metric("Carts with a reason flag (rule)", f"{(reasons['Rule_Flag'] != 'None').sum():,}")
-k4.metric("AI-suggested High (separate)", f"{(reasons['AI_Tier'] == 'High').sum():,}")
+k3.metric("Purchase justification: High", f"{(justified['Tier'] == 'High').sum():,}")
+k4.metric("Purchase justification: Medium", f"{(justified['Tier'] == 'Medium').sum():,}")
 st.caption(
-    "Rule results (G2B, G2C, reason flags) are computed in Python. AI-suggested tiers come from the "
-    "justification screen and never change the rule results."
+    "G2B and G2C are rule-based. The purchase-justification tier combines a rule check of the reason "
+    "text, an AI assessment of the items and a price comparison; the tab shows why each cart is rated."
 )
 
 
@@ -272,8 +251,8 @@ def case_tab(rule_id: str, intro: str) -> None:
         )
 
 
-g2b_tab, g2c_tab, reason_tab = st.tabs([
-    "G2B: Spend across the 6-month reset", "G2C: Same cost centre and category", "Reason & justification",
+g2b_tab, g2c_tab, pj_tab = st.tabs([
+    "G2B: Spend across the 6-month reset", "G2C: Same cost centre and category", "Purchase justification",
 ])
 
 with g2b_tab:
@@ -292,109 +271,107 @@ with g2c_tab:
         "buyers in the same department (p.21)."
     ))
 
-with reason_tab:
+with pj_tab:
     st.markdown(
-        "**What this checks:** each cart's reason for purchase, two ways, shown side by side.  \n"
-        "- **Rule flag** (Python, Governance Guide p.20): the reason text alone is vague (e.g. 'QB2025'), "
-        "or contains offline, email, refer or approval wording.  \n"
-        "- **AI-suggested tier** (LLM plus price bands, Guide p.22 and p.24): whether each item's core "
-        "function fits the stated reason; items priced between the category's 90th percentile and maximum "
-        "go up one tier, above the maximum two tiers. Display: Very High = High; High and Medium = Medium; "
-        "Low and Very Low = Low. The AI result never changes the rule flag."
+        "**What this checks:** whether each cart's reason for purchase justifies what was bought. One tier "
+        "per cart, combining three inputs (Governance Guide p.20, p.22 and p.24):  \n"
+        "- **Reason check** (Python): flags vague reasons (e.g. 'QB2025') and approval wording such as "
+        "offline, email, refer or approval. Approval wording sets a minimum of Medium.  \n"
+        "- **AI assessment** (LLM, told about the reason check and given retrieved guidance to cite): whether "
+        "each item's core function fits the stated reason. A reason with no stated purpose is a documentation "
+        "gap (Medium for everyday items, High for specialised or costly items).  \n"
+        "- **Price bands** (Python): items priced between the category's 90th percentile and maximum go up "
+        "one tier, above the maximum two tiers.  \n"
+        "Tier display: Very High = High; High and Medium = Medium; Low and Very Low = Low. The **Why** column "
+        "lists what drove each tier."
     )
     unscreened = [c for c in ai_eligible["Cart_ID"] if c not in ai_results]
     m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Carts", f"{len(reasons):,}")
-    m2.metric("Rule-flagged", f"{(reasons['Rule_Flag'] != 'None').sum():,}")
-    m3.metric("AI-screened", f"{len(ai_eligible) - len(unscreened):,} / {len(ai_eligible):,}")
-    m4.metric("AI-suggested High / Medium", f"{(reasons['AI_Tier'] == 'High').sum():,} / {(reasons['AI_Tier'] == 'Medium').sum():,}")
-    if api_key and unscreened:
-        if st.button(f"Screen {len(unscreened)} unscreened cart(s) with {ui.CHAT_MODEL}", type="primary", key="ai-run"):
-            bar = st.progress(0.0, text="Starting AI screen...")
-            new, errors = js.screen_carts(
-                ai_items, unscreened, api_key, ui.CHAT_MODEL, ai_cache,
-                progress=lambda done, total: bar.progress(done / total, text=f"Screened {done}/{total} carts"),
+    m1.metric("Carts", f"{len(justified):,}")
+    m2.metric("AI-assessed", f"{len(ai_eligible) - len(unscreened):,} / {len(ai_eligible):,}")
+    m3.metric("High", f"{(justified['Tier'] == 'High').sum():,}")
+    m4.metric("Medium", f"{(justified['Tier'] == 'Medium').sum():,}")
+    if unscreened:
+        if api_key:
+            st.info(
+                f"{len(unscreened)} cart(s) have no AI assessment yet and show a provisional, rule-only tier."
             )
-            ai_results.update(new)
-            if not errors:
-                st.rerun()
-            st.warning(f"{len(errors)} cart(s) could not be screened; they stay unscreened and can be retried.")
-            with st.expander("Errors"):
-                st.json(errors)
-            reasons = reason_table()
-    elif not api_key:
-        st.warning("Set OPENAI_API_KEY to run the AI screen. Rule flags and price bands work without it.")
+            if st.button(f"Assess {len(unscreened)} cart(s) with {ui.CHAT_MODEL}", type="primary", key="ai-run"):
+                bar = st.progress(0.0, text="Retrieving guidance and starting the AI assessment...")
+                new, errors = js.screen_carts(
+                    ai_items, unscreened, api_key, ui.CHAT_MODEL, ai_cache, retriever=retriever,
+                    progress=lambda done, total: bar.progress(done / total, text=f"Assessed {done}/{total} carts"),
+                )
+                ai_results.update(new)
+                if not errors:
+                    st.rerun()
+                st.warning(f"{len(errors)} cart(s) could not be assessed; they stay provisional and can be retried.")
+                with st.expander("Errors"):
+                    st.json(errors)
+                justified = justification_table()
+        else:
+            st.warning(
+                f"{len(unscreened)} cart(s) have no AI assessment and show a provisional, rule-only tier. "
+                "Set OPENAI_API_KEY to assess them."
+            )
 
-    f1, f2 = st.columns(2)
-    rule_filter = f1.multiselect("Rule flag", RULE_FLAG_OPTIONS, default=RULE_FLAG_OPTIONS, key="reason-rule")
-    ai_filter = f2.multiselect("AI-suggested tier", AI_TIER_OPTIONS, default=AI_TIER_OPTIONS, key="reason-ai")
-    flagged_only = st.checkbox(
-        "Only carts with a rule flag or an AI-suggested High, Medium or Uncertain tier", value=True, key="reason-only",
-    )
-    view = reasons[reasons["Rule_Flag"].isin(rule_filter) & reasons["AI_Tier"].isin(ai_filter)]
+    tier_filter = st.multiselect("Tier", js.TIER_OPTIONS, default=js.TIER_OPTIONS, key="pj-tier")
+    flagged_only = st.checkbox("Only High, Medium and Uncertain", value=True, key="pj-only")
+    view = justified[justified["Tier"].isin(tier_filter)]
     if flagged_only:
-        view = view[(view["Rule_Flag"] != "None") | view["AI_Tier"].isin(["High", "Medium", "Uncertain"])]
+        view = view[view["Tier"].isin(["High", "Medium", "Uncertain"])]
     st.dataframe(
-        view[["Rule_Flag", "AI_Tier", "Reason_For_Purchase", "AI_Summary", "Rule_Tier", "AI_Five_Level",
-              "AI_Price_Escalated", "Cart_Total", "Date", "Cart_ID"]],
+        view[["Tier", "Why", "Reason_For_Purchase", "Level", "Cart_Total", "Date", "Basis", "Cart_ID"]],
         hide_index=True, use_container_width=True,
     )
     st.download_button(
         "Download this list (CSV)", view.to_csv(index=False).encode("utf-8-sig"),
-        file_name=f"qb_govlens_reason_justification_{selected_agency}_{ui.now_sgt():%Y%m%d_%H%M%S}_SGT.csv",
-        mime="text/csv", key="reason-csv",
+        file_name=f"qb_govlens_purchase_justification_{selected_agency}_{ui.now_sgt():%Y%m%d_%H%M%S}_SGT.csv",
+        mime="text/csv", key="pj-csv",
     )
 
     if not view.empty:
-        labels = {
-            r["Cart_ID"]: f"{r['AI_Tier']} (AI) | {r['Rule_Flag']} (rule) | {r['Reason_For_Purchase']}"
-            for _, r in view.iterrows()
-        }
-        cart_id = st.selectbox("Open a cart", list(labels), format_func=labels.get, key="reason-cart")
+        labels = {r["Cart_ID"]: f"{r['Tier']} | {r['Reason_For_Purchase']}" for _, r in view.iterrows()}
+        cart_id = st.selectbox("Open a cart", list(labels), format_func=labels.get, key="pj-cart")
         row = view[view["Cart_ID"] == cart_id].iloc[0]
-        st.markdown(ui.md(f"**Reason for purchase:** {row['Reason_For_Purchase'] or '(blank)'}"))
-        left, right = st.columns(2)
-        with left:
-            st.markdown("**Rule flag (Python)**")
-            if row["Rule_Flag"] == "None":
-                st.write("No vague wording or approval keywords found.")
-            else:
-                st.markdown(ui.md(
-                    f"{row['Rule_Flag']} · {row['Rule_Tier']}"
-                    + (f"  \nKeywords: {row['Rule_Keywords']}" if row["Rule_Keywords"] else "")
-                ))
-        with right:
-            st.markdown("**AI-suggested tier**")
-            if cart_id in ai_results:
-                summary, item_rows = js.combine(ai_items, cart_id, ai_results[cart_id])
-                st.markdown(ui.md(
-                    f"{summary['Display_Tier']} (five-level: {summary['Risk_Level']}; AI base: "
-                    f"{summary['AI_Base_Level']})  \n{summary['Assessment_Summary']}"
-                ))
-            else:
-                summary = None
-                item_rows = ai_items[ai_items["Cart_ID_Effective"] == cart_id]
-                st.write(row["AI_Tier"] + ".")
-        if summary:
-            with st.expander("AI and price working", expanded=True):
-                st.markdown(ui.md(summary["Assessment"]))
-        item_cols = ["Item_Ref", "Item_Desc", "Product_Category", "Qty_Num", "Unit_Price_After_Discount",
-                     "Price_Band", "Peer_Count"]
-        if summary:
-            item_cols += ["AI_Base_Level", "Escalated_By", "Final_Level", "Core_Function", "AI_Rationale"]
-        st.dataframe(item_rows[[c for c in item_cols if c in item_rows.columns]], hide_index=True, use_container_width=True)
-        categories = ", ".join(sorted(set(item_rows["Product_Category"]))) if not item_rows.empty else ""
-        query = (
-            f"Reason for purchase: {row['Reason_For_Purchase']}. Product categories: {categories}. "
-            "Vague reasons or offline approval keywords; whether there was a requirement for purchase; "
-            "price reasonableness within product categories."
+        st.markdown(ui.md(
+            f"**{row['Tier']}**" + (f" (five-level: {row['Level']})" if row["Level"] else "")
+            + f" · {row['Basis']}  \n**Why:** {row['Why']}  \n"
+            f"**Reason for purchase:** {row['Reason_For_Purchase'] or '(blank)'}"
+        ))
+        st.caption(
+            "Reason check: " + ("vague reason" if row["Rule_Vague"] else "reason states a purpose")
+            + (f"; approval wording found ({row['Approval_Wording']})" if row["Approval_Wording"] else "; no approval wording")
+            + "."
         )
-        with st.expander("Related guidance (retrieved from the knowledge base)"):
-            ui.show_hits(ui.related_guidance(retriever, f"{kb_fp}|{retriever.method}", query, (("GG", 2), ("RS", 1))))
+        record = ai_results.get(cart_id)
+        if record:
+            summary, item_rows = js.combine(ai_items, cart_id, record)
+            with st.expander("AI assessment and price working", expanded=True):
+                st.markdown(ui.md(summary["Assessment"]))
+                st.caption(f"Assessed {summary['Assessed_At_SGT']} with {summary['Model']} (prompt {record.get('prompt_version', '')}).")
+        else:
+            item_rows = ai_items[ai_items["Cart_ID_Effective"] == cart_id]
+        item_cols = ["Item_Ref", "Item_Desc", "Product_Category", "Qty_Num", "Unit_Price_After_Discount",
+                     "Price_Band", "Peer_Count", "AI_Base_Level", "Escalated_By", "Final_Level",
+                     "Core_Function", "AI_Rationale"]
+        st.dataframe(item_rows[[c for c in item_cols if c in item_rows.columns]], hide_index=True, use_container_width=True)
+        knowledge_by_id = {p.citation: p for p in retriever.passages}
+        cited = [knowledge_by_id[c] for c in (record or {}).get("citations", []) if c in knowledge_by_id]
+        if cited:
+            with st.expander(f"Guidance cited by the AI ({len(cited)} passage(s))"):
+                for passage in cited:
+                    st.markdown(f"**[{passage.citation}] {passage.title}**  \n*{passage.source}, {passage.location}*")
+                    st.markdown(ui.md(passage.text))
+        else:
+            with st.expander("Related guidance (retrieved from the knowledge base)"):
+                query = js.guidance_query(ai_items, cart_id) if cart_id in set(ai_items["Cart_ID_Effective"]) else row["Reason_For_Purchase"]
+                ui.show_hits(ui.related_guidance(retriever, f"{kb_fp}|{retriever.method}", query, tuple(js.GUIDANCE_PER_DOC.items())))
         ui.reviewer_notes(
             f"cart-{cart_id}",
-            {"cart_id": cart_id, "reason_for_purchase": row["Reason_For_Purchase"],
-             "rule_flag": row["Rule_Flag"], "rule_tier": row["Rule_Tier"], "ai_tier": row["AI_Tier"],
-             "ai_assessment": summary["Assessment"] if summary else ""},
-            f"govlens_reason_{cart_id}",
+            {"cart_id": cart_id, "reason_for_purchase": row["Reason_For_Purchase"], "tier": row["Tier"],
+             "level": row["Level"], "why": row["Why"], "basis": row["Basis"],
+             "ai_assessment": summary["Assessment"] if record else "",
+             "cited_passages": (record or {}).get("citations", [])},
+            f"govlens_purchase_justification_{cart_id}",
         )

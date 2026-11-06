@@ -238,14 +238,24 @@ class Retriever:
         return "Keyword retrieval fallback (no embeddings)" + (f": {self.note}" if self.note else "")
 
     def search(self, query: str, per_doc: dict[str, int]) -> list[Hit]:
-        hits: list[Hit] = []
-        query_vector = None
-        if self.method == "embedding":
+        return self.search_many([query], per_doc)[0]
+
+    def search_many(self, queries: list[str], per_doc: dict[str, int]) -> list[list[Hit]]:
+        """Search several queries, embedding them in one batch call."""
+        vectors = None
+        if self.method == "embedding" and queries:
             try:
-                query_vector = self.embed([query])[0]
-            except Exception as exc:  # network/key issues: degrade this query, do not crash
+                vectors = self.embed(list(queries))
+            except Exception as exc:  # network/key issues: degrade these queries, do not crash
                 self.note = f"query embedding failed ({type(exc).__name__}); keyword fallback used"
-                query_vector = None
+                vectors = None
+        return [
+            self._search_one(q, vectors[i] if vectors is not None else None, per_doc)
+            for i, q in enumerate(queries)
+        ]
+
+    def _search_one(self, query: str, query_vector, per_doc: dict[str, int]) -> list[Hit]:
+        hits: list[Hit] = []
         for doc in DOC_ORDER:
             k = per_doc.get(doc, 0)
             if not k:

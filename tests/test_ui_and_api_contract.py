@@ -119,7 +119,7 @@ def test_main_page_has_one_tab_per_check_and_reviews_cases(monkeypatch):
     fake, counts = fake_streamlit()
     run_page(monkeypatch, fake, APP_DIR / "views" / "review.py")
     assert counts["tabs"] == [
-        "G2B: Spend across the 6-month reset", "G2C: Same cost centre and category", "Reason & justification",
+        "G2B: Spend across the 6-month reset", "G2C: Same cost centre and category", "Purchase justification",
     ]
     assert counts["review"] == 2  # one review button per rule tab
     for rule in ("G2B", "G2C"):
@@ -138,14 +138,15 @@ def test_sidebar_has_no_fictitious_data_or_officer_cap_setting(monkeypatch):
     assert len(counts["slider"]) == 2
 
 
-def test_reason_tab_shows_rule_flag_and_ai_tier_side_by_side(monkeypatch):
+def test_purchase_justification_tab_shows_one_tier_with_reasons(monkeypatch):
     fake, counts = fake_streamlit(review_button=False)
     run_page(monkeypatch, fake, APP_DIR / "views" / "review.py")
-    tables = [d for d in counts["dataframes"] if hasattr(d, "columns") and {"Rule_Flag", "AI_Tier"} <= set(d.columns)]
-    assert tables, "reason & justification table not rendered"
+    tables = [d for d in counts["dataframes"] if hasattr(d, "columns") and {"Tier", "Why", "Basis"} <= set(d.columns)]
+    assert tables, "purchase justification table not rendered"
     table = tables[0]
-    assert "Vague reason" in set(table["Rule_Flag"])
-    assert set(table["AI_Tier"]) <= {"High", "Medium", "Uncertain", "Low", "Not screened", "Out of scope (#welfare)"}
+    assert not {"Rule_Flag", "AI_Tier"} & set(table.columns), "rule flag and AI tier are no longer separate columns"
+    assert set(table["Tier"]) <= set(__import__("govlens.justification", fromlist=["x"]).TIER_OPTIONS)
+    assert table["Why"].str.len().gt(0).all()
 
 
 APP_DIR = Path(__file__).parents[1]
@@ -263,7 +264,8 @@ def test_ai_explanation_requires_citation_from_retrieved_text(monkeypatch):
 
 
 def test_justification_call_uses_strict_json_schema(monkeypatch):
-    payload = {"cart_id": "C1", "items": [{"item_ref": "I1"}]}
+    payload = {"cart_id": "C1", "items": [{"item_ref": "I1"}],
+               "reference_guidance": [{"citation": "GG-CHECK-REASONS", "source": "s", "title": "t", "text": "x"}]}
     calls = []
     fake_module = ModuleType("openai")
 
@@ -273,7 +275,8 @@ def test_justification_call_uses_strict_json_schema(monkeypatch):
 
         def create(self, **kwargs):
             calls.append(kwargs)
-            out = {"cart_id": "C1", "assessment": "ok", "assessment_summary": "ok",
+            out = {"cart_id": "C1", "assessment": "ok [GG-CHECK-REASONS]", "assessment_summary": "ok",
+                   "citations": ["GG-CHECK-REASONS"],
                    "items": [{"item_ref": "I1", "core_function": "snack", "base_risk_level": "Low", "rationale": "fits"}]}
             return SimpleNamespace(output_text=json.dumps(out))
 
@@ -284,6 +287,8 @@ def test_justification_call_uses_strict_json_schema(monkeypatch):
     fmt = calls[0]["text"]["format"]
     assert fmt["type"] == "json_schema" and fmt["strict"] is True
     assert calls[0]["store"] is False and calls[0]["temperature"] == 0
+    assert fmt["schema"]["properties"]["citations"]["items"]["enum"] == ["GG-CHECK-REASONS"]
+    assert "reference_guidance" in calls[0]["input"] and "pre_checks" not in payload  # payload built by caller
 
 
 def test_api_key_lookup_order(tmp_path, monkeypatch):

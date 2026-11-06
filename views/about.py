@@ -61,7 +61,7 @@ with col_in:
         "- Governance Guide checks covered: *Split purchases* (rules G2B and G2C), "
         "*Anomalies in reasons for purchase* (rule REASON), and *requirement for purchase / price "
         "reasonableness* (AI justification screen)\n"
-        "- Two use cases (below), delivered as three tabs: G2B, G2C and Reason & justification"
+        "- Two use cases (below), delivered as three tabs: G2B, G2C and Purchase justification"
     )
 with col_out:
     st.markdown("**Out of scope for this prototype**")
@@ -86,12 +86,13 @@ with uc1:
         "writes an explanation in which every citation is checked against the retrieved passages."
     )
 with uc2:
-    st.subheader("2. Reason & justification")
+    st.subheader("2. Purchase justification")
     st.markdown(
-        "Each cart gets two results, side by side in one tab. A **rule flag** checks the reason text "
-        "for vague wording or offline-approval keywords. An **AI-suggested tier** judges whether each "
-        "item's core function fits the stated reason, then GovLens raises the tier for items priced "
-        "above the category's 90th percentile. The AI result never changes the rule flag."
+        "Each cart gets **one tier** for whether its reason for purchase justifies what was bought. A rule "
+        "checks the reason text for vague wording and approval wording; an LLM, given that check and "
+        "retrieved guidance to cite, judges whether each item's core function fits the stated reason; and "
+        "GovLens raises the tier for items priced above the category's 90th percentile. A **Why** column "
+        "names what drove each tier, and approval wording always means at least Medium."
     )
 
 st.header("Data sources")
@@ -142,9 +143,9 @@ st.markdown(
     "| Governance review › G2B and G2C tabs | Flagged cases by priority with score breakdown, CSV export; open a "
     "case to see its orders and items; one-click **Review and explain** with retrieved passages and similarity "
     "scores; reviewer disposition and notes, JSON export |\n"
-    "| Governance review › Reason & justification | One row per cart with the rule flag and the AI-suggested tier "
-    "side by side, filters, CSV export; one-click AI screening; cart detail with AI and price working, related "
-    "guidance, reviewer notes and JSON export |\n"
+    "| Governance review › Purchase justification | One row per cart with a single tier and the reasons for it, "
+    "filters, CSV export; AI results shipped with the app; cart detail with the AI assessment and its cited "
+    "guidance, price working, item table, reviewer notes and JSON export |\n"
     "| Methodology | Flowcharts, prompts, data coverage, the full knowledge-base index and a retrieval check per rule |\n"
     "| Sidebar | Data source (masked sample or upload) and detection settings: days around the reset, cost-centre "
     "screening amount, shared reason words |"

@@ -37,15 +37,15 @@ FLOW_OVERVIEW = f"""digraph overview {{
     docs -> chunk -> embed -> vs;
   }}
   split [label="Split-purchase rules\\nG2B · G2C"];
-  reason [label="Reason rule (REASON)\\n+ price bands"];
-  aiscreen [label="AI justification screen", {AI}];
+  reason [label="Reason check (REASON)\\n+ price bands"];
+  aiscreen [label="AI assessment\\n(cites retrieved guidance)", {AI}];
   uc1 [label="Use case 1: split-purchase review\\nG2B and G2C tabs\\ncase list + cited explanation", {OUT}];
-  uc2 [label="Use case 2: reason & justification\\nrule flag and AI-suggested tier\\nside by side", {OUT}];
+  uc2 [label="Use case 2: purchase justification\\none combined tier per cart\\nwith the reasons for it", {OUT}];
   norm -> split -> uc1;
   norm -> reason -> uc2;
   norm -> aiscreen -> uc2;
   vs -> uc1 [label="retrieve", style=dashed];
-  vs -> uc2 [label="related guidance", style=dashed];
+  vs -> aiscreen [label="retrieve", style=dashed];
 }}"""
 
 FLOW_UC1 = f"""digraph uc1 {{
@@ -81,39 +81,43 @@ FLOW_UC1 = f"""digraph uc1 {{
 
 FLOW_UC2 = f"""digraph uc2 {{
 {_STYLE}
-  start [label="Admin opens the Reason & justification tab", {ADMIN}];
+  start [label="Admin opens the Purchase justification tab", {ADMIN}];
   scope [label="Approved, non-cancelled carts\\n(selected agency and financial years)"];
-  rule [label="REASON rule on the reason text only\\nvague (e.g. QB2025) → Low\\noffline / email / refer / approval → Medium"];
-  click [label="Admin clicks \\"Screen N unscreened carts\\"\\n(#welfare carts out of scope)", {ADMIN}];
-  cache [label="Result cached for this cart,\\nmodel and prompt version?", {DECISION}];
-  store [label="Screen cache\\n.cache/ai_screen", {STORE}];
-  payload [label="Payload per cart: reason, item descriptions,\\ncategories, qty, prices (no price bands)\\nchunks of ≤ 25 items"];
-  llm [label="gpt-4o-mini with justification prompt\\nfunction vs. stated purpose → BASE level per item\\nstrict JSON schema · temperature 0", {AI}];
-  check [label="Validate: every item returned,\\nlevels in allowed list"];
-  bands [label="Unit price after discount vs. OTHER carts' items\\nin the same Product_Category (all agencies)\\n→ price band per item"];
-  more [label="More than 5\\ncomparison records?", {DECISION}];
-  esc [label="90th percentile–max: +1 tier\\nabove max: +2 tiers, cap at Very High\\n(never lowers a tier; Uncertain not escalated)"];
-  keep [label="Keep base level"];
-  cart [label="Cart level = highest item level\\nDisplay: Very High→High · High/Medium→Medium · Low/Very Low→Low"];
-  table [label="One row per cart: rule flag | AI-suggested tier\\nshown side by side, never merged\\nfilters · CSV download", {OUT}];
-  detail [label="Cart detail: AI and price working, item table,\\nrelated guidance retrieved from the knowledge base\\nreviewer notes · JSON download", {OUT}];
+  rule [label="Reason check (Python) on the reason text\\nvague? (e.g. QB2025)\\napproval wording? (offline / email / refer / approval)"];
+  bundle [label="AI results shipped with the app\\n(precomputed, keyed by cart data,\\nmodel and prompt version)", {STORE}];
+  have [label="AI result for\\nthis cart?", {DECISION}];
+  click [label="Admin clicks \\"Assess N carts\\"\\n(only for carts without a result)", {ADMIN}];
+  query [label="Retrieval query from reason + categories\\n→ embed → top 3 GG + top 1 RS passages"];
+  vs [label="Local vector store", {STORE}];
+  payload [label="Payload per cart: reason, pre-checks, items\\n(qty, prices; no price bands), guidance passages\\nchunks of ≤ 25 items"];
+  llm [label="gpt-4o-mini with justification prompt\\nno invented purpose · label-only reason = gap\\nBASE level per item · cites guidance\\nstrict JSON schema · temperature 0", {AI}];
+  check [label="Validate: every item returned, allowed levels,\\ncitations only from supplied passages"];
+  bands [label="Unit price after discount vs. OTHER carts' items\\nin the same Product_Category (all agencies)"];
+  esc [label="More than 5 records: 90th pct–max +1 tier,\\nabove max +2, cap Very High\\n→ cart level = highest item level"];
+  floor [label="Combine: never below Medium\\nif approval wording found"];
+  prov [label="Provisional rule-only tier\\napproval wording → Medium\\nvague → Low"];
+  table [label="One row per cart: tier + Why\\n(reason check · AI summary · price)\\nfilters · CSV download", {OUT}];
+  detail [label="Cart detail: AI assessment with citations,\\nprice working, items, cited passages,\\nreviewer notes · JSON download", {OUT}];
 
   start -> scope;
   scope -> rule;
-  scope -> click;
+  scope -> have;
+  bundle -> have [style=dashed];
+  have -> esc [label="yes"];
+  have -> prov [label="no"];
+  prov -> click [style=dashed];
+  click -> query;
+  vs -> query [style=dashed];
+  query -> payload;
+  rule -> payload [label="pre-checks", style=dashed];
+  payload -> llm -> check -> esc;
+  bands -> esc;
   scope -> bands;
-  click -> cache;
-  cache -> store [label="yes: reuse", style=dashed];
-  cache -> payload [label="no"];
-  payload -> llm -> check;
-  check -> store [label="save"];
-  store -> more;
-  bands -> more;
-  more -> esc [label="yes"];
-  more -> keep [label="no"];
-  esc -> cart; keep -> cart;
-  rule -> table;
-  cart -> table -> detail;
+  esc -> floor;
+  rule -> floor [label="approval wording", style=dashed];
+  floor -> table;
+  prov -> table;
+  table -> detail;
 }}"""
 
 FLOWCHARTS = {"overview": FLOW_OVERVIEW, "uc1": FLOW_UC1, "uc2": FLOW_UC2}

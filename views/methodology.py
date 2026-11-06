@@ -24,10 +24,10 @@ def _sample_quality() -> dict:
 
 st.title("Methodology")
 st.markdown(
-    "QB GovLens combines **deterministic rules** (which decide what is flagged), **retrieval-augmented "
-    "generation** over official QB guidance (which explains a flag, with verified citations), and an "
-    "**LLM judgement step** whose output is post-processed by deterministic price logic and shown beside, "
-    "never merged into, the rule result. Colour key in every flowchart: blue = Python, purple = LLM or "
+    "QB GovLens combines **deterministic rules** (which decide the split-purchase flags), **retrieval-"
+    "augmented generation** over official QB guidance (which explains a flag, with verified citations), and "
+    "an **LLM judgement step** that rates purchase justification with cited guidance, bounded by deterministic "
+    "price logic and a rule minimum. Colour key in every flowchart: blue = Python, purple = LLM or "
     "embeddings, yellow = administrator action, green = output."
 )
 
@@ -80,39 +80,46 @@ st.markdown(
 with st.expander("System instructions used for the explanation"):
     st.code(SYSTEM_INSTRUCTIONS, language="text")
 
-st.header("3. Use case 2: reason & justification (one tab)")
+st.header("3. Use case 2: purchase justification (one tab)")
 st.graphviz_chart(FLOW_UC2, use_container_width=True)
 st.markdown(
-    "Each cart gets two independent results, shown side by side and never merged.\n\n"
-    "**Rule flag (Python; Guide p.20, anomalies in reasons for purchase).** The REASON rule reads only "
-    "the reason text. Vague reasons (e.g. 'QB2025', 'QB buy', fewer than two meaningful words without a "
-    "purpose hashtag) are Low; offline, email, refer or approval wording, which can suggest approval "
-    "sought outside QB, is Medium. The rule is deliberately broad.\n\n"
-    "**AI-suggested tier (LLM plus Python; Guide p.22 requirement for purchase, p.24 price "
-    "reasonableness).** Each cart in scope is sent to the chat model as JSON: the reason for purchase and "
-    "each item's category, description, quantity and prices. The prompt asks the model to identify each "
-    "item's core function (ignoring marketing themes but not luxury brand tier), judge whether that "
-    "function can serve the stated purpose, and assign a base level from Very Low to Very High, or "
-    "Uncertain. The response must match a strict JSON schema; GovLens rejects it unless every item is "
-    "returned with an allowed level. Carts with more than 25 items are sent in parts.\n\n"
-    "**Price escalation (Python).** Unit price after discount (`Amount_After_Discount / Qty`) is "
-    "compared with items from *other* carts in the same `Product_Category` across all agencies. With "
-    "more than 5 comparison records, an item between the 90th percentile and the maximum is escalated "
-    "by one tier and an item above the maximum by two tiers, capped at Very High. Price never lowers "
-    "a level and Uncertain items are not escalated. Price bands are deliberately **not** sent to the "
-    "model, so the arithmetic is transparent and testable.\n\n"
-    "**Why both.** The two overlap only where a vague reason leaves the items unexplained. The rule "
-    "alone catches approval wording, which the AI prompt does not look for; the AI alone catches a "
-    "specific reason that does not fit the items bought."
+    "Each cart gets **one tier**, built from three inputs, with a *Why* column naming what drove it.\n\n"
+    "**Reason check (Python; Guide p.20, anomalies in reasons for purchase).** The REASON rule reads the "
+    "reason text and records whether it is vague (e.g. 'QB2025', 'QB buy', fewer than two meaningful words "
+    "without a purpose hashtag) and whether it contains approval wording (offline, email, refer, approval), "
+    "which can suggest approval sought outside QB. Both findings are passed to the AI. Approval wording also "
+    "sets a **minimum of Medium** for the cart, so the AI cannot rate it away.\n\n"
+    "**AI assessment (LLM with retrieval; Guide p.22 requirement for purchase).** For each cart, a query "
+    "built from the reason and product categories is embedded and matched against the knowledge base; "
+    f"the top {js.GUIDANCE_PER_DOC['GG']} Governance Guide passages and top {js.GUIDANCE_PER_DOC['RS']} "
+    "rule-spec passage are sent with the cart. The model judges each item's core function against the "
+    "stated reason (ignoring marketing themes but not luxury brand tier) and assigns a base level from Very "
+    "Low to Very High, or Uncertain. It must not invent a purpose the reason does not state: a reason with no "
+    "operational context is a documentation gap (Medium for everyday items, High for specialised or costly "
+    "items, Very High only for items with no conceivable use); agency purpose hashtags count as a stated "
+    "purpose. The response must match a strict JSON schema whose citation field only accepts the passages "
+    "supplied; GovLens also rejects any assessment that cites nothing or cites an unknown passage. Carts with "
+    "more than 25 items are sent in parts.\n\n"
+    "**Price escalation (Python; Guide p.24 price reasonableness).** Unit price after discount "
+    "(`Amount_After_Discount / Qty`) is compared with items from *other* carts in the same "
+    "`Product_Category` across all agencies. With more than 5 comparison records, an item between the "
+    "90th percentile and the maximum is escalated by one tier and an item above the maximum by two tiers, "
+    "capped at Very High. Price never lowers a level and Uncertain items are not escalated. Price bands "
+    "are deliberately **not** sent to the model, so the arithmetic is transparent and testable.\n\n"
+    "**Combining.** The cart takes its highest item level after price escalation, raised to Medium if the "
+    "reason has approval wording. Until a cart has an AI result its tier is provisional and rule-only "
+    "(Medium for approval wording, Low for a vague reason). AI results for the masked sample are "
+    "precomputed and shipped with the app (`scripts/precompute_ai_screen.py`), so viewers see them "
+    "without triggering API calls."
 )
 st.dataframe(
     pd.DataFrame({
-        "Five-level AI result": ["Very High", "High", "Medium", "Low", "Very Low", "Uncertain"],
+        "Five-level result": ["Very High", "High", "Medium", "Low", "Very Low", "Uncertain"],
         "Display tier": [js.DISPLAY_TIER[k] for k in ["Very High", "High", "Medium", "Low", "Very Low", "Uncertain"]],
     }),
     hide_index=True,
 )
-with st.expander("Justification prompt used for the AI screen"):
+with st.expander("Purchase-justification prompt"):
     st.code(js.SYSTEM_PROMPT, language="text")
 with st.expander("Required JSON output schema"):
     st.json(js.OUTPUT_SCHEMA)
@@ -159,11 +166,12 @@ st.header("5. Implementation details")
 st.dataframe(
     pd.DataFrame([
         ("app.py", "Sign-in gate and page navigation"),
-        ("views/review.py", "Main page: G2B, G2C and Reason & justification tabs"),
+        ("views/review.py", "Main page: G2B, G2C and Purchase justification tabs"),
         ("govlens/engine.py", "Data normalisation and the G2B, G2C and REASON rules"),
         ("govlens/knowledge.py", "Knowledge-base parser, embeddings, local vector store, keyword fallback"),
         ("govlens/rag.py", "Retrieval queries, explanation prompt, citation validation"),
-        ("govlens/justification.py", "Price bands, justification prompt and schema, escalation, caching"),
+        ("govlens/justification.py", "Price bands, justification prompt and schema, combined tier, results cache"),
+        ("scripts/precompute_ai_screen.py", "Runs the AI assessment for the sample and saves results shipped with the app"),
         ("govlens/ui.py", "Shared page helpers: models, API key, retriever, reviewer notes"),
         ("knowledge_base/*.md", "Curated Governance Guide, Data Glossary and rule specification"),
         ("scripts/build_glossary_kb.py", "Rebuilds the glossary passages from the official .xlsx"),
@@ -179,11 +187,11 @@ st.markdown(
     "structure (headings for explanations, JSON schema for the screen); worked examples of "
     "function-versus-marketing reasoning; instructions to treat buyer and seller text as untrusted "
     "data; and a two-stage chain in each use case: retrieval then grounded generation then citation "
-    "check (use case 1), and LLM judgement then deterministic escalation (use case 2).\n\n"
+    "check (use case 1), and retrieval then LLM judgement with citations then deterministic escalation and rule minimum (use case 2).\n\n"
     "**Testing.** Automated tests cover the rule edge cases (thresholds, agency separation, cancelled "
     "and welfare exclusions, no double counting), retrieval of the right guidance for each rule, "
     "vector-store caching, rejection of invented citations, price-band and escalation maths, the "
-    "JSON-schema contract, the sign-in gate and the page layout."
+    "JSON-schema and citation contract, the combined tier and its minimum, the sign-in gate and the page layout."
 )
 
 st.header("6. Limitations")
@@ -194,6 +202,6 @@ st.markdown(
     "- The REASON rule is deliberately broad and will raise false alarms.\n"
     "- Product categories are broad marketplace labels, so price bands can compare dissimilar items.\n"
     "- LLM judgements can be wrong (for example, inferring a purpose the reason does not state). They are "
-    "labelled as AI-suggested and require human review.\n"
+    "shown with the reasons behind each tier and require human review.\n"
     "- No user roles, agency access control or audit trail; a single hardcoded login protects the prototype."
 )

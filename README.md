@@ -7,10 +7,10 @@ masked QB Admin Portal exports and produces **review aids, not findings**.
   flag cases; on an admin's click, passages are retrieved from the built-in
   knowledge base by embedding similarity and an OpenAI model writes an
   explanation whose citations are verified against the retrieved passages.
-- **Use case 2, reason & justification (one tab):** per cart, a deterministic
-  REASON flag (vague or approval wording) and an AI-suggested tier (an LLM rates
-  the items against the stated reason; Python applies category price-band
-  escalation), shown side by side and never merged.
+- **Use case 2, purchase justification (one tab):** one tier per cart combining a
+  deterministic check of the reason text (vague or approval wording), an LLM
+  assessment of the items against the stated reason that cites retrieved
+  guidance, and category price-band escalation, with a "Why" column.
 
 ## Pages and sign-in
 
@@ -18,7 +18,7 @@ masked QB Admin Portal exports and produces **review aids, not findings**.
 
 - **Governance review** (main page): the required educational-use disclaimer and three tabs:
   G2B (spend across the 6-month reset), G2C (same cost centre and category) and
-  Reason & justification.
+  Purchase justification.
 - **About Us**: scope, objectives, data sources, features and guardrails.
 - **Methodology**: data flows, a flowchart for each use case (also exported as PNG/SVG in
   `docs/flowcharts/` for slides), prompts, data coverage, the knowledge-base index, a
@@ -78,36 +78,47 @@ shows which passages each rule retrieves, with scores.
   code); shared category and reason words raise priority.
 - **G2C:** same agency / cost centre / product category / half-FY, at least two
   material buyers (>10% share) with combined > $6,000 screening amount.
-- **REASON:** follows Governance Guide p.20. Vague reasons (e.g. `QB2025`,
-  `QB buy`, fewer than two meaningful words and no purpose hashtag) = Low;
-  keywords offline / email / refer / approval = Medium. Deliberately broad.
+- **REASON (reason check):** follows Governance Guide p.20. Flags vague reasons
+  (e.g. `QB2025`, `QB buy`, fewer than two meaningful words and no purpose
+  hashtag) and approval wording (offline / email / refer / approval). Deliberately
+  broad. Feeds the purchase-justification tier below.
 
-## AI justification screen
+## Purchase justification (one tier per cart)
 
-1. The LLM receives one cart (reason, item descriptions, categories, quantities,
-   unit and total prices; **no price bands**) and returns strict JSON: per-item
-   core function, base risk level (Very Low ... Very High, or Uncertain) and
-   rationale, plus an assessment and summary. Carts with more than 25 items are
-   sent in chunks.
+1. For each cart, a query built from the reason and product categories retrieves
+   the top 3 Governance Guide and top 1 rule-spec passages (embeddings).
+2. The LLM receives the cart (reason, the REASON pre-checks, item descriptions,
+   categories, quantities, unit and total prices; **no price bands**) and the
+   passages, and returns strict JSON: per-item core function, base risk level
+   (Very Low ... Very High, or Uncertain) and rationale, an assessment that cites
+   the passages, a summary and the citation IDs. It must not invent a purpose the
+   reason does not state: label-only reasons are a documentation gap (Medium for
+   everyday items, High for specialised or costly items). Citations outside the
+   supplied passages are rejected. Carts with more than 25 items are sent in chunks.
 2. Python computes unit price after discount (`Amount_After_Discount / Qty`) and
    compares it with other carts' items in the same `Product_Category` across all
    agencies. With more than 5 comparison records: 90th percentile to maximum = +1
    tier, above maximum = +2, capped at Very High. Price never lowers a tier.
-3. The cart takes its highest item tier. Display: Very High = High; High and
-   Medium = Medium; Low and Very Low = Low; Uncertain stays Uncertain.
-4. Results are cached per cart, model and prompt version in `.cache/ai_screen/`,
-   so screening runs once per dataset. Download the list as CSV from the tab.
+3. The cart takes its highest item level after price escalation, raised to Medium
+   if the reason has approval wording. Display: Very High = High; High and Medium
+   = Medium; Low and Very Low = Low; Uncertain stays Uncertain. Carts without an AI
+   result show a provisional rule-only tier.
+4. AI results for the masked sample are **precomputed and shipped** in
+   `precomputed/ai_screen_results.json`, keyed by cart data, model and prompt
+   version. Generate them locally with `python scripts/precompute_ai_screen.py`
+   (needs `OPENAI_API_KEY` in `.env`), then commit and push the file. Re-run it
+   whenever the prompt version, the chat model or the sample data changes; it only
+   re-sends carts without a current result.
 
-The chat model (`gpt-4o-mini`) and embedding model are fixed in `govlens/ui.py`.
-Changing the chat model invalidates the cached AI screen results.
+The chat model (`gpt-4o-mini`) and embedding model are fixed in `govlens/models.py`.
 
 ## Deploying to Streamlit Community Cloud
 
 1. Push this folder to a **private** GitHub repository (`.env` and `.cache/` are git-ignored).
 2. In Streamlit Community Cloud, create an app from the repo with main file `app.py`.
 3. Under the app's **Secrets**, add `OPENAI_API_KEY = "sk-..."`.
-4. Open the app, sign in, and run the AI screen once (Reason & justification tab) so results are cached.
-   (The cache resets if the app restarts; re-running only re-sends uncached carts.)
+4. Commit `precomputed/ai_screen_results.json` (see above) so the deployed app shows AI
+   results without anyone running the assessment or spending API credit.
 
 ## Not implemented (PoC limits)
 

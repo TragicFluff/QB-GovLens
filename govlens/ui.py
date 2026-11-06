@@ -10,10 +10,11 @@ from zoneinfo import ZoneInfo
 import streamlit as st
 
 from .config import get_api_key
-from .knowledge import DEFAULT_EMBEDDING_MODEL, build_retriever, corpus_fingerprint, load_knowledge_base
+from .knowledge import build_retriever, corpus_fingerprint, load_knowledge_base
+from . import models
 
-CHAT_MODEL = "gpt-4o-mini"
-EMBEDDING_MODEL = DEFAULT_EMBEDDING_MODEL
+CHAT_MODEL = models.CHAT_MODEL
+EMBEDDING_MODEL = models.EMBEDDING_MODEL
 
 
 def _secret(name: str) -> str:

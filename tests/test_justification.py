@@ -112,7 +112,7 @@ def test_screen_uses_cache_and_isolates_failures(tmp_path):
             raise RuntimeError("boom")
         return record(payload["cart_id"], ["Low"])
 
-    cache = js.ScreenCache(tmp_path)
+    cache = js.ScreenCache(tmp_path, bundle=None)
     results, errors = js.screen_carts(it, ["C1", "C2", "BAD"], "k", "m", cache, call=fake_call)
     assert set(results) == {"C1", "C2"} and set(errors) == {"BAD"}
     js.screen_carts(it, ["C1", "C2"], "k", "m", cache, call=fake_call)
@@ -128,6 +128,129 @@ def test_prompt_keeps_users_framework_and_moves_price_escalation_to_code():
     assert "do NOT apply any price escalation" in p
     assert "Brand TIER is different from a marketing theme" in p
     assert js.OUTPUT_SCHEMA["properties"]["items"]["items"]["properties"]["base_risk_level"]["enum"][-1] == "Uncertain"
+
+
+def test_prompt_v2_forbids_invented_purpose_and_grades_label_only_reasons():
+    p = js.SYSTEM_PROMPT
+    assert js.PROMPT_VERSION == "justification-v2.0"
+    assert "Do NOT invent or infer a purpose" in p
+    assert "#refillforpantry" in p
+    assert "everyday, low-cost consumables, office or pantry items -> Medium" in p
+    # the old literal "zero operational grounding => Very High" reading is removed
+    assert "or a stated reason that provides zero operational grounding." not in p
+    assert "reason_flagged_vague" in p and "approval_wording_found" in p and "reference_guidance" in p
+
+
+def test_payload_carries_rule_pre_checks():
+    it = items_frame([("C1", "Snacks", 1.0)])
+    it["Reason_For_Purchase"] = "QB2025 funded from approval of operations"
+    payload = js.cart_payloads(it, "C1")[0]
+    assert isinstance(payload["pre_checks"]["reason_flagged_vague"], bool)
+    assert payload["pre_checks"]["approval_wording_found"] == ["approval"]
+    assert "reference_guidance" not in payload  # guidance is added per call, outside the cache key
+
+
+def guidance(*ids):
+    return [{"citation": c, "source": "s", "title": "t", "text": "x"} for c in ids]
+
+
+def test_citations_must_come_from_supplied_guidance():
+    payload = {"items": [{"item_ref": "I1"}], "reference_guidance": guidance("GG-CHECK-REASONS", "RS-AI-SCREEN")}
+    ok = {**record("C1", ["Medium"]), "assessment": "Vague reason [GG-CHECK-REASONS].", "citations": ["GG-CHECK-REASONS"]}
+    assert js.validate_output(payload, ok)
+    with pytest.raises(ValueError, match="did not cite"):
+        js.validate_output(payload, {**ok, "citations": []})
+    with pytest.raises(ValueError, match="unknown"):
+        js.validate_output(payload, {**ok, "assessment": "See [GG-CHECK-SPLIT].", "citations": ["GG-CHECK-REASONS"]})
+    schema = js.output_schema(["GG-CHECK-REASONS", "RS-AI-SCREEN"])
+    assert schema["properties"]["citations"]["items"]["enum"] == ["GG-CHECK-REASONS", "RS-AI-SCREEN"]
+
+
+def test_guidance_is_sent_but_cache_key_ignores_it(tmp_path):
+    it = items_frame([("C1", "Snacks", 1.0)])
+    seen = []
+
+    class FakeRetriever:
+        def search_many(self, queries, per_doc):
+            assert per_doc == js.GUIDANCE_PER_DOC
+            from govlens.knowledge import Hit, load_knowledge_base
+            kb = {p.citation: p for p in load_knowledge_base()}
+            return [[Hit(kb["GG-CHECK-REASONS"], 0.9, "embedding"), Hit(kb["RS-AI-SCREEN"], 0.8, "embedding")]
+                    for _ in queries]
+
+    def fake_call(payload, api_key, model):
+        seen.append([g["citation"] for g in payload["reference_guidance"]])
+        return {**record(payload["cart_id"], ["Medium"]), "assessment": "Gap [GG-CHECK-REASONS].",
+                "citations": ["GG-CHECK-REASONS"]}
+
+    cache = js.ScreenCache(tmp_path, bundle=None)
+    results, errors = js.screen_carts(it, ["C1"], "k", "m", cache, call=fake_call, retriever=FakeRetriever())
+    assert not errors and seen == [["GG-CHECK-REASONS", "RS-AI-SCREEN"]]
+    assert results["C1"]["citations"] == ["GG-CHECK-REASONS"]
+    assert results["C1"]["guidance_supplied"] == ["GG-CHECK-REASONS", "RS-AI-SCREEN"]
+    # found again without any retriever, because the key depends on cart data only
+    assert set(js.cached_results(it, ["C1"], "m", cache)) == {"C1"}
+
+
+def test_invalid_citation_is_retried_once(tmp_path):
+    it = items_frame([("C1", "Snacks", 1.0)])
+    attempts = []
+
+    def flaky(payload, api_key, model):
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise ValueError("assessment did not cite the supplied guidance")
+        return record(payload["cart_id"], ["Low"])
+
+    results, errors = js.screen_carts(it, ["C1"], "k", "m", js.ScreenCache(tmp_path, bundle=None), call=flaky)
+    assert set(results) == {"C1"} and len(attempts) == 2
+
+
+def test_bundle_is_written_and_read_back(tmp_path):
+    it = items_frame([("C1", "Snacks", 1.0), ("C2", "Snacks", 2.0)])
+    results = {"C1": record("C1", ["Low"]), "C2": record("C2", ["High"])}
+    path = tmp_path / "bundle.json"
+    assert js.write_bundle(results, it, "m", path) == 2
+    cache = js.ScreenCache(tmp_path / "runtime", bundle=path)
+    assert set(js.cached_results(it, ["C1", "C2"], "m", cache)) == {"C1", "C2"}
+    assert js.cached_results(it, ["C1"], "other-model", cache) == {}
+
+
+# ---------------------------------------------------------- combined tier
+
+def test_combined_tier_applies_approval_minimum_over_ai():
+    it = items_frame(peers(6) + [("C1", "Snacks", 10.0)])
+    out = js.combined_tier(it, "C1", "Funded from approval of operations", record("C1", ["Low"]))
+    assert out["AI_Level"] == "Low"
+    assert out["Level"] == "Medium" and out["Tier"] == "Medium"
+    assert "minimum Medium (applied)" in out["Why"]
+
+
+def test_combined_tier_keeps_higher_ai_level_and_lists_price_driver():
+    it = items_frame(peers(6) + [("C1", "Snacks", 999.0)])
+    out = js.combined_tier(it, "C1", "QB2025", record("C1", ["Medium"]))
+    assert out["Level"] == "Very High" and out["Tier"] == "High"
+    assert "Vague reason" in out["Why"] and "above category max (+2)" in out["Why"]
+
+
+def test_combined_tier_without_ai_result_is_provisional():
+    it = items_frame([("C1", "Snacks", 1.0)])
+    vague = js.combined_tier(it, "C1", "QB2025", None)
+    approval = js.combined_tier(it, "C1", "approved via email", None)
+    clean = js.combined_tier(it, "C1", "refill for pantry", None)
+    assert (vague["Tier"], approval["Tier"], clean["Tier"]) == ("Low", "Medium", "Not screened")
+    assert vague["Basis"].startswith("Rule only (provisional")
+
+
+def test_combined_tier_uncertain_ai_falls_back_to_rule_minimum():
+    it = items_frame([("C1", "Snacks", 1.0)])
+    assert js.combined_tier(it, "C1", "refill for pantry", record("C1", ["Uncertain"]))["Tier"] == "Uncertain"
+    assert js.combined_tier(it, "C1", "email approval obtained", record("C1", ["Uncertain"]))["Tier"] == "Medium"
+
+
+def test_combined_tier_marks_welfare_out_of_scope():
+    it = items_frame([("C1", "Snacks", 1.0)])
+    assert js.combined_tier(it, "C1", "#welfare snacks", None, in_scope=False)["Tier"] == "Out of scope (#welfare)"
 
 
 @pytest.mark.parametrize("loader", [create_demo, load_masked_sample])
