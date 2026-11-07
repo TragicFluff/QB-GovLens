@@ -24,7 +24,14 @@ from govlens.ui_text import DISCLAIMER
 SOURCES = ["Masked QB sample (built-in)", "Upload QB CSV exports"]
 OFFICER_CAP = 6000.0  # QB's system-enforced spend limit per officer per 6-month period
 TIER_ORDER_PJ = {t: i for i, t in enumerate(js.TIER_OPTIONS)}
-LEVEL_ORDER = {lvl: -i for i, lvl in enumerate(js.LEVELS)}
+
+
+def chart_colors() -> dict:
+    """Chart palette matching the theme the viewer sees (light or dark)."""
+    try:
+        return charts.palette(st.context.theme.type)
+    except Exception:  # older Streamlit, or no browser context (tests)
+        return charts.palette()
 
 st.title("QB GovLens")
 st.caption("Governance review for QuickBuy@SGov agency administrators")
@@ -149,8 +156,7 @@ def justification_table() -> pd.DataFrame:
     table = carts_view.merge(pd.DataFrame(rows).drop(columns="Reason_For_Purchase"), on="Cart_ID", how="left")
     table["Date"] = pd.to_datetime(table["Date"]).dt.date
     table["_t"] = table["Tier"].map(TIER_ORDER_PJ)
-    table["_l"] = table["Level"].map(LEVEL_ORDER).fillna(1)
-    return table.sort_values(["_t", "_l", "Cart_Total"], ascending=[True, True, False]).drop(columns=["_t", "_l"])
+    return table.sort_values(["_t", "Cart_Total"], ascending=[True, False]).drop(columns=["_t"])
 
 
 justified = justification_table()
@@ -208,9 +214,10 @@ def case_tab(rule_id: str, intro: str) -> None:
     linked = case_orders(case, orders)
     linked_items = case_items(case, item_detail)
     if rule_id == "G2B":
-        st.altair_chart(charts.g2b_reset_chart(case, linked, linked_items, OFFICER_CAP), use_container_width=True)
+        st.altair_chart(charts.g2b_reset_chart(case, linked, linked_items, OFFICER_CAP, chart_colors()),
+                        use_container_width=True)
     elif rule_id == "G2C":
-        st.altair_chart(charts.g2c_buyer_timeline(case, linked_items), use_container_width=True)
+        st.altair_chart(charts.g2c_buyer_timeline(case, linked_items, colors=chart_colors()), use_container_width=True)
     st.markdown("**Orders in this case**")
     linked = linked.assign(Order_Date=linked["Event_Date"].dt.date)
     st.dataframe(
@@ -367,17 +374,17 @@ with g2c_tab:
 
 with pj_tab:
     st.markdown(
-        "**What this checks:** whether each cart's reason for purchase justifies what was bought. One tier "
-        "per cart, combining three inputs (Governance Guide p.20, p.22 and p.24):  \n"
-        "- **Reason check** (Python): flags vague reasons (e.g. 'QB2025') and approval wording such as "
-        "offline, email, refer or approval. Approval wording sets a minimum of Medium.  \n"
-        "- **AI assessment** (LLM, told about the reason check and given retrieved guidance to cite): whether "
-        "each item's core function fits the stated reason. A reason with no stated purpose is a documentation "
-        "gap (Medium for everyday items, High for specialised or costly items).  \n"
-        "- **Price bands** (Python): items priced between the category's 90th percentile and maximum go up "
-        "one tier, above the maximum two tiers.  \n"
-        "Tier display: Very High = High; High and Medium = Medium; Low and Very Low = Low. The **Why** column "
-        "lists what drove each tier."
+        "**What this checks:** whether each cart's reason for purchase justifies what was bought. Each cart "
+        "gets one tier, **High**, **Medium** or **Low**, from three inputs (Governance Guide p.20, p.22 and p.24):  \n"
+        "- **AI assessment** (LLM, given retrieved guidance to cite): rates each item High (clear red flags that "
+        "warrant investigation), Medium (plausible, but the reason leaves gaps) or Low (fits the reason). A reason "
+        "with no stated purpose, such as 'QB2025', is Medium for everyday items and High for specialised or "
+        "costly ones.  \n"
+        "- **Price** (Python): an item that costs more than anything else bought in its category (with more than "
+        "5 comparisons) goes up one tier. Items in the top 10% are noted but do not change the tier.  \n"
+        "- **Reason check** (Python): flags vague reasons and approval wording such as offline, email, refer or "
+        "approval. Approval wording means at least Medium.  \n"
+        "The cart takes its highest item tier. The **Why** column lists what drove each tier."
     )
     unscreened = [c for c in ai_eligible["Cart_ID"] if c not in ai_results]
     m1, m2, m3, m4 = st.columns(4)
@@ -415,7 +422,7 @@ with pj_tab:
     if flagged_only:
         view = view[view["Tier"].isin(["High", "Medium", "Uncertain"])]
     st.dataframe(
-        view[["Tier", "Why", "Reason_For_Purchase", "Level", "Cart_Total", "Date", "Basis", "Cart_ID"]],
+        view[["Tier", "Why", "Reason_For_Purchase", "Cart_Total", "Date", "Basis", "Cart_ID"]],
         hide_index=True, use_container_width=True,
     )
     st.download_button(
@@ -429,8 +436,7 @@ with pj_tab:
         cart_id = st.selectbox("Open a cart", list(labels), format_func=labels.get, key="pj-cart")
         row = view[view["Cart_ID"] == cart_id].iloc[0]
         st.markdown(ui.md(
-            f"**{row['Tier']}**" + (f" (five-level: {row['Level']})" if row["Level"] else "")
-            + f" · {row['Basis']}  \n**Why:** {row['Why']}  \n"
+            f"**{row['Tier']}** · {row['Basis']}  \n**Why:** {row['Why']}  \n"
             f"**Reason for purchase:** {row['Reason_For_Purchase'] or '(blank)'}"
         ))
         st.caption(
@@ -450,14 +456,17 @@ with pj_tab:
                      "Price_Band", "Peer_Count", "AI_Base_Level", "Escalated_By", "Final_Level",
                      "Core_Function", "AI_Rationale"]
         st.dataframe(item_rows[[c for c in item_cols if c in item_rows.columns]], hide_index=True, use_container_width=True)
-        escalated = ai_items[(ai_items["Cart_ID_Effective"] == cart_id) & (ai_items["Price_Escalation"] > 0)]
-        if not escalated.empty:
-            with st.expander(f"What the price bands compare with ({len(escalated)} item(s) raised on price)", expanded=True):
+        dear = ai_items[(ai_items["Cart_ID_Effective"] == cart_id) & ai_items["More_Than_5_Records"].astype(bool)
+                        & ai_items["Price_Band"].isin([js.TOP_TEN_PERCENT, js.BANDS[5]])]
+        if not dear.empty:
+            raised = int((dear["Price_Escalation"] > 0).sum())
+            with st.expander(f"What the price comparison is based on ({len(dear)} item(s) in the top 10% of their "
+                             f"category, {raised} above its maximum)", expanded=True):
                 st.caption(
                     "Product categories are broad marketplace labels. If the dearest items below are not like the "
-                    "item, the price escalation rests on a weak comparison."
+                    "item, the price comparison is weak evidence."
                 )
-                for _, item in escalated.iterrows():
+                for _, item in dear.iterrows():
                     st.markdown(ui.md(
                         f"**{item['Item_Ref']} · {item['Product_Category']}:** {str(item['Item_Desc'])[:90]} at "
                         f"${item['Unit_Price_After_Discount']:,.2f} ({item['Price_Band']}; {item['Peer_Count']} "
@@ -478,7 +487,7 @@ with pj_tab:
         ui.reviewer_notes(
             f"cart-{cart_id}",
             {"cart_id": cart_id, "reason_for_purchase": row["Reason_For_Purchase"], "tier": row["Tier"],
-             "level": row["Level"], "why": row["Why"], "basis": row["Basis"],
+             "ai_tier": row["AI_Level"], "why": row["Why"], "basis": row["Basis"],
              "ai_assessment": summary["Assessment"] if record else "",
              "cited_passages": (record or {}).get("citations", [])},
             f"govlens_purchase_justification_{cart_id}",

@@ -65,8 +65,8 @@ def main() -> int:
         print(f"Wrote {ev.JUSTIFICATION_LABELS.relative_to(APP_DIR)}: fill in your_tier (High/Medium/Low), "
               "then run this script again.")
         return 0
-    labels = labels.merge(table[["Cart_ID", "Tier", "Level", "Why"]].rename(
-        columns={"Cart_ID": "cart_id", "Tier": "govlens_tier", "Level": "govlens_level", "Why": "govlens_why"}),
+    labels = labels.merge(table[["Cart_ID", "Tier", "AI_Level", "Why"]].rename(
+        columns={"Cart_ID": "cart_id", "Tier": "govlens_tier", "AI_Level": "govlens_ai_tier", "Why": "govlens_why"}),
         on="cart_id", how="left")
     result = ev.agreement(labels)
     if not result["labelled"]:

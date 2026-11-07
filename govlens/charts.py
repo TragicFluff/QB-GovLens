@@ -5,9 +5,8 @@
 * g2c_buyer_timeline: across the half-year, did different buyers in one cost centre buy the same category on
   the same days from the same seller (pointing to one need split across colleagues),
   or spread out over the half-year (pointing to independent needs)?
-* price_position_chart: is an item's price escalation a genuine outlier, or does the
-  product category mix dissimilar goods? Hover over the grey marks to see what the
-  item is being compared with.
+* dearest_comparisons (a table, not a chart): the most expensive items a price comparison
+  rests on, so a reviewer can see whether the category mixes dissimilar goods.
 """
 
 from __future__ import annotations
@@ -17,9 +16,24 @@ import pandas as pd
 
 from .casefacts import buyer_labels
 
-GREY = "#9aa5b1"
-ACCENT = "#c2410c"
-INK = "#334155"
+# QB palette (quickbuy.gov.sg): blue for the mark that answers the question, orange as the second
+# brand colour, greys for context. QB's own blue (#10069F) is too dark to see on a dark background,
+# so the dark palette uses a lighter QB blue; the logo orange is darkened slightly on white.
+QB_BLUE = "#10069F"
+QB_ORANGE = "#D9661A"
+PALETTES = {
+    "light": {"highlight": QB_BLUE, "accent": QB_ORANGE, "grey": "#9aa5b1", "ink": "#334155",
+              "muted": "#475569", "stroke": "white",
+              "series": [QB_BLUE, QB_ORANGE, "#0F766E", "#8E2C8A", "#A16207"]},
+    "dark": {"highlight": "#A5A0FF", "accent": "#F7984A", "grey": "#6B7280", "ink": "#D1D5DB",
+             "muted": "#9CA3AF", "stroke": "#1F2937",
+             "series": ["#A5A0FF", "#F7984A", "#2DD4BF", "#E879F9", "#FACC15"]},
+}
+
+
+def palette(theme_type: str | None = None) -> dict:
+    """Chart colours for the app's light or dark theme (st.context.theme.type)."""
+    return PALETTES["dark" if theme_type == "dark" else "light"]
 
 
 def _first_category(detail: pd.DataFrame) -> dict[str, str]:
@@ -38,12 +52,13 @@ def _categories(detail: pd.DataFrame) -> dict[str, set[str]]:
 
 
 def g2b_reset_chart(case: pd.Series, linked_orders: pd.DataFrame, linked_items: pd.DataFrame,
-                    officer_cap: float = 6000.0) -> alt.Chart:
+                    officer_cap: float = 6000.0, colors: dict | None = None) -> alt.Chart:
     """Cumulative spend across the window, the reset date and the $6,000 limit.
 
     Orders are coloured by whether their product category was also bought on the other
     side of the reset, which is the question G2B leaves to the reviewer.
     """
+    c = colors or palette()
     data = linked_orders[["Order_ID", "Event_Date", "Total_Amt_Payable", "Seller_Name", "Reason_For_Purchase"]]
     data = data.sort_values("Event_Date").copy()
     boundary = pd.Timestamp(case["Boundary"])
@@ -68,16 +83,16 @@ def g2b_reset_chart(case: pd.Series, linked_orders: pd.DataFrame, linked_items: 
     data = data[["Date", "Amount", "Cumulative", "Category", "Match", "Seller", "Reason", "Layer"]]
 
     base = alt.Chart(data).encode(x=alt.X("Date:T", title=None, axis=alt.Axis(format="%d %b")))
-    line = base.mark_line(interpolate="step-after", color=INK, strokeWidth=2).encode(
+    line = base.mark_line(interpolate="step-after", color=c["ink"], strokeWidth=2).encode(
         y=alt.Y("Cumulative:Q", title="Spend summed across the reset ($)")
     )
-    points = base.mark_circle(opacity=0.95, stroke="white", strokeWidth=1).encode(
+    points = base.mark_circle(opacity=0.95, stroke=c["stroke"], strokeWidth=1).encode(
         y="Cumulative:Q",
         size=alt.Size("Amount:Q", scale=alt.Scale(range=[90, 600]), legend=None),
         order=alt.Order("Layer:Q"),
         color=alt.Color("Match:N", title=None, legend=alt.Legend(orient="bottom", labelLimit=400),
                         scale=alt.Scale(domain=["Category also bought on the other side", "Category on one side only"],
-                                        range=[ACCENT, GREY])),
+                                        range=[c["highlight"], c["grey"]])),
         tooltip=[
             alt.Tooltip("Date:T", format="%d %b %Y"), alt.Tooltip("Amount:Q", title="Order ($)", format=",.2f"),
             alt.Tooltip("Cumulative:Q", title="Summed so far ($)", format=",.2f"), "Category:N",
@@ -85,19 +100,19 @@ def g2b_reset_chart(case: pd.Series, linked_orders: pd.DataFrame, linked_items: 
         ],
     )
     cap = alt.Chart(pd.DataFrame({"y": [officer_cap], "label": [f"${officer_cap:,.0f}: one period's limit"]}))
-    cap_rule = cap.mark_rule(strokeDash=[6, 4], color="#64748b").encode(y="y:Q")
-    cap_text = cap.mark_text(align="left", dx=4, dy=-7, color="#475569", fontSize=11).encode(
+    cap_rule = cap.mark_rule(strokeDash=[6, 4], color=c["muted"]).encode(y="y:Q")
+    cap_text = cap.mark_text(align="left", dx=4, dy=-7, color=c["muted"], fontSize=11).encode(
         y="y:Q", x=alt.value(0), text="label:N"
     )
     reset = alt.Chart(pd.DataFrame({"x": [boundary], "label": [f"Limit resets {boundary.day} {boundary:%b %Y}"]}))
-    reset_rule = reset.mark_rule(color=GREY, strokeWidth=2).encode(x="x:T")
-    reset_text = reset.mark_text(align="left", dx=5, y=8, color="#475569", fontSize=11).encode(x="x:T", text="label:N")
+    reset_rule = reset.mark_rule(color=c["grey"], strokeWidth=2).encode(x="x:T")
+    reset_text = reset.mark_text(align="left", dx=5, y=8, color=c["muted"], fontSize=11).encode(x="x:T", text="label:N")
     return (line + points + cap_rule + cap_text + reset_rule + reset_text).properties(
         height=320, padding={"top": 14, "left": 5, "right": 5, "bottom": 5},
         title=alt.TitleParams(
-            "Spend before and after the reset", anchor="start", fontSize=14,
-            subtitle="QB applies the limit within each period, so a line above it is not a breach. "
-                     "Orange: the same category was bought on both sides.",
+            "Spend before and after the reset", anchor="start", fontSize=14, color=c["ink"], subtitleColor=c["muted"],
+            subtitle=["QB applies the limit within each period, so a line above it is not a breach.",
+                      "Blue: the same category was bought on both sides of the reset."],
         ),
     )
 
@@ -114,8 +129,10 @@ def _half_year_bounds(period: str) -> tuple[pd.Timestamp, pd.Timestamp] | None:
     return pd.Timestamp(year, 10, 1), pd.Timestamp(year + 1, 3, 31)
 
 
-def g2c_buyer_timeline(case: pd.Series, linked_items: pd.DataFrame, top_sellers: int = 5) -> alt.Chart:
+def g2c_buyer_timeline(case: pd.Series, linked_items: pd.DataFrame, top_sellers: int = 5,
+                       colors: dict | None = None) -> alt.Chart:
     """One row per buyer across the half-year: when each bought, how much, from which seller."""
+    c = colors or palette()
     orders = (
         linked_items.groupby(["Order_ID", "Buyer_Corporate_Email"], as_index=False)
         .agg(Date=("Event_Date", "min"), Amount=("Amount_After_Discount", "sum"),
@@ -139,67 +156,24 @@ def g2c_buyer_timeline(case: pd.Series, linked_items: pd.DataFrame, top_sellers:
         .agg(Amount=("Amount", "sum"), Orders=("Reason", "size"), Reason=("Reason", "first"))
     )
     domain = keep + (["Other sellers"] if (orders["Seller_Shown"] == "Other sellers").any() else [])
-    palette = ["#c2410c", "#1d4ed8", "#0f766e", "#a16207", "#7c3aed"][: len(keep)] + [GREY]
+    seller_colors = c["series"][: len(keep)] + [c["grey"]]
     bounds = _half_year_bounds(case.get("Period", ""))
     x_scale = alt.Scale(domain=[bounds[0], bounds[1]]) if bounds else alt.Undefined
-    return alt.Chart(orders).mark_circle(opacity=0.8, stroke="white", strokeWidth=1).encode(
+    return alt.Chart(orders).mark_circle(opacity=0.8, stroke=c["stroke"], strokeWidth=1).encode(
         x=alt.X("Date:T", title=f"{case.get('Period', '')} (half financial year)", scale=x_scale,
                 axis=alt.Axis(format="%b %Y", tickCount="month")),
         y=alt.Y("Buyer:N", title=None, sort=list(labels.values()), axis=alt.Axis(labelOverlap=False)),
         size=alt.Size("Amount:Q", scale=alt.Scale(range=[60, 700]), legend=None),
-        color=alt.Color("Seller_Shown:N", title="Seller", scale=alt.Scale(domain=domain, range=palette)),
+        color=alt.Color("Seller_Shown:N", title="Seller", scale=alt.Scale(domain=domain, range=seller_colors)),
         tooltip=[alt.Tooltip("Date:T", format="%d %b %Y"), "Buyer:N", alt.Tooltip("Amount:Q", title="Amount ($)", format=",.2f"),
                  "Orders:Q", "Seller:N", alt.Tooltip("Reason:N", title="First reason")],
     ).properties(
         height=max(160, 56 * len(labels)),
         title=alt.TitleParams(
-            "Who bought, when, and from which seller", anchor="start", fontSize=14,
-            subtitle="Dots lined up on the same dates, especially from one seller, can point to one need split "
-                     "across colleagues; dots spread over the half-year point to separate needs.",
+            "Who bought, when, and from which seller", anchor="start", fontSize=14, color=c["ink"], subtitleColor=c["muted"],
+            subtitle=["Dots lined up on the same dates, especially from one seller, can point to one need split "
+                      "across colleagues;", "dots spread over the half-year point to separate needs."],
         ),
-    )
-
-
-def price_position_chart(cart_items: pd.DataFrame, all_items: pd.DataFrame) -> alt.Chart | None:
-    """Each item's unit price against other carts' items in its category (log scale)."""
-    rows, marks, refs = [], [], []
-    for _, item in cart_items.iterrows():
-        if not item.get("More_Than_5_Records", False):
-            continue
-        label = f"{item['Item_Ref']} · {item['Product_Category']}"
-        peers = all_items[
-            (all_items["Product_Category"] == item["Product_Category"])
-            & (all_items["Cart_ID_Effective"] != item["Cart_ID_Effective"])
-        ]
-        for _, peer in peers.iterrows():
-            rows.append({"Row": label, "Price": float(peer["Unit_Price_After_Discount"]),
-                         "Item": str(peer.get("Item_Desc") or "")[:70]})
-        marks.append({"Row": label, "Price": float(item["Unit_Price_After_Discount"]),
-                      "Item": str(item.get("Item_Desc") or "")[:70], "Band": item["Price_Band"]})
-        refs += [{"Row": label, "Price": float(item["Peer_P90"]), "Ref": "90th percentile"},
-                 {"Row": label, "Price": float(item["Peer_Max"]), "Ref": "Maximum"}]
-    if not marks:
-        return None
-    peers_df, marks_df, refs_df = pd.DataFrame(rows), pd.DataFrame(marks), pd.DataFrame(refs)
-    order = list(dict.fromkeys(marks_df["Row"]))
-    x = alt.X("Price:Q", title="Unit price after discount ($, log scale)", scale=alt.Scale(type="log"))
-    y = alt.Y("Row:N", title=None, sort=order)
-    peer_layer = alt.Chart(peers_df).mark_tick(color=GREY, opacity=0.55, thickness=1.5, size=18).encode(
-        x=x, y=y, tooltip=[alt.Tooltip("Price:Q", format=",.2f"), alt.Tooltip("Item:N", title="Compared with")]
-    )
-    ref_layer = alt.Chart(refs_df).mark_tick(thickness=2.5, size=26).encode(
-        x="Price:Q", y=y,
-        color=alt.Color("Ref:N", title="Category reference",
-                        scale=alt.Scale(domain=["90th percentile", "Maximum"], range=["#64748b", INK])),
-        tooltip=["Ref:N", alt.Tooltip("Price:Q", format=",.2f")],
-    )
-    item_layer = alt.Chart(marks_df).mark_point(shape="diamond", filled=True, size=190, color=ACCENT).encode(
-        x="Price:Q", y=y, tooltip=[alt.Tooltip("Price:Q", title="This item ($)", format=",.2f"), "Item:N", "Band:N"]
-    )
-    return (peer_layer + ref_layer + item_layer).properties(
-        height=max(90, 60 * len(order)),
-        title=alt.TitleParams("This cart's items (orange) against other purchases in the same category",
-                              anchor="start", fontSize=14),
     )
 
 

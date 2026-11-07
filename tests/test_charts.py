@@ -26,7 +26,7 @@ def test_g2b_chart_marks_categories_bought_on_both_sides():
     rows = [r for r in _layer_data(spec) if "Match" in r]
     both = {r["Category"] for r in rows if r["Match"] == "Category also bought on the other side"}
     assert both == {"Home Appliances"}  # the case's only shared category
-    assert "not a breach" in spec["title"]["subtitle"]
+    assert "not a breach" in " ".join(spec["title"]["subtitle"])
 
 
 def test_g2c_timeline_spans_the_half_year_and_keeps_buyers_anonymous():
@@ -48,8 +48,18 @@ def test_half_year_bounds():
 
 def test_dearest_comparisons_are_the_price_band_peers():
     items = js.add_price_bands(js.build_items(ORDERS, DETAIL))
-    item = items[items["Price_Escalation"] == 2].iloc[0]
+    item = items[items["Price_Escalation"] == 1].iloc[0]  # above the category maximum
     table = charts.dearest_comparisons(item, items)
     assert len(table) == 5
     assert table["Unit price ($)"].is_monotonic_decreasing
     assert table["Unit price ($)"].iloc[0] == round(item["Peer_Max"], 2)  # top row is the band's maximum
+
+
+def test_dark_palette_keeps_marks_readable_on_a_dark_page():
+    case = CASES[CASES["Case_ID"] == "GL-B86AAAF494B8"].iloc[0]
+    dark = charts.palette("dark")
+    spec = charts.g2b_reset_chart(case, case_orders(case, ORDERS), case_items(case, DETAIL), colors=dark).to_dict()
+    text = str(spec)
+    assert dark["highlight"] in text and charts.QB_BLUE not in text  # QB's own blue is too dark on dark
+    assert charts.palette("light")["highlight"] == charts.QB_BLUE
+    assert charts.palette(None) == charts.palette("light")

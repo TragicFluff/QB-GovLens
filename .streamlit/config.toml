@@ -1,0 +1,27 @@
+# QB GovLens theme: dark, with QuickBuy@SGov's brand colours (quickbuy.gov.sg).
+#   QB blue #10069F (sidebar uses a deep tint, #16134A; links use a light QB blue, #A5A0FF,
+#   because the brand blue itself is too dark to read on a dark page),
+#   QB logo orange #F7984A (controls use a deeper orange, #C2410C, so their white text stays legible).
+[theme]
+base = "dark"
+primaryColor = "#C2410C"
+backgroundColor = "#0F0E1A"
+secondaryBackgroundColor = "#1B1A2E"
+textColor = "#ECEBF5"
+linkColor = "#A5A0FF"
+borderColor = "#2B2A45"
+font = "Inter:https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap, sans-serif"
+headingFontWeights = [600, 600, 600, 600, 600, 600]
+baseRadius = "4px"
+buttonRadius = "4px"
+showSidebarBorder = false
+orangeColor = "#F7984A"
+chartCategoricalColors = ["#A5A0FF", "#F7984A", "#2DD4BF", "#E879F9", "#FACC15", "#6B7280"]
+blueBackgroundColor = "#1B1A2E"
+blueTextColor = "#A5A0FF"
+
+[theme.sidebar]
+backgroundColor = "#16134A"
+secondaryBackgroundColor = "#221E5E"
+textColor = "#E7E6F5"
+borderColor = "#2F2A7A"

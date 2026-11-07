@@ -40,7 +40,7 @@ def test_more_than_max_is_possible_because_own_cart_is_excluded():
     row = it[it.Cart_ID_Effective.eq("C1")].iloc[0]
     assert row.Peer_Count == 6
     assert row.Price_Band == "more than maximum"
-    assert row.Price_Escalation == 2
+    assert row.Price_Escalation == 1
 
 
 def test_five_or_fewer_records_means_no_price_step():
@@ -58,30 +58,38 @@ def record(cart, levels):
     }
 
 
-@pytest.mark.parametrize("price, base, expected_final, expected_display", [
-    (999.0, "Low", "High", "Medium"),            # above max: +2
-    (14.9, "Low", "Medium", "Medium"),           # peers 10..15: P90 14.5 < 14.9 <= max: +1
-    (14.2, "Low", "Low", "Low"),                 # Q3 13.75 < 14.2 <= P90 14.5: no step
-    (10.0, "Low", "Low", "Low"),                 # below Q1: no change
-    (999.0, "Very High", "Very High", "High"),   # capped
-    (999.0, "High", "Very High", "High"),
-    (999.0, "Uncertain", "Uncertain", "Uncertain"),
+@pytest.mark.parametrize("price, base, expected", [
+    (999.0, "Low", "Medium"),          # above the category maximum: one step
+    (999.0, "Medium", "High"),
+    (999.0, "High", "High"),           # already the highest tier
+    (14.9, "Low", "Low"),              # peers 10..15: P90 14.5 < 14.9 <= max: top 10%, noted only
+    (14.2, "Low", "Low"),              # Q3 13.75 < 14.2 <= P90 14.5: no step
+    (10.0, "Low", "Low"),              # below Q1: no change
+    (999.0, "Uncertain", "Uncertain"),
 ])
-def test_escalation_cap_and_display_mapping(price, base, expected_final, expected_display):
+def test_one_price_step_only_above_the_category_maximum(price, base, expected):
     it = items_frame(peers(6) + [("C1", "Snacks", price)])
     summary, rows = js.combine(it, "C1", record("C1", [base]))
-    assert summary["Risk_Level"] == expected_final
-    assert summary["Display_Tier"] == expected_display
+    assert summary["Tier"] == expected
     assert "Price working (computed by GovLens, not the AI)" in summary["Assessment"]
+    if price == 14.9:
+        assert "top 10% of its category (noted; does not change the tier)" in summary["Assessment"]
+
+
+def test_three_tiers_from_the_start():
+    assert js.LEVELS == ["Low", "Medium", "High"]
+    assert js.OUTPUT_SCHEMA["properties"]["items"]["items"]["properties"]["base_risk_level"]["enum"] == [
+        "Low", "Medium", "High", "Uncertain"]
+    assert js.BAND_ESCALATION == {js.BANDS[5]: 1}
 
 
 def test_cart_takes_highest_item_and_names_high_items():
     it = items_frame(peers(6) + [("C1", "Snacks", 10.0), ("C1", "Snacks", 999.0)])
     summary, rows = js.combine(it, "C1", record("C1", ["Low", "Medium"]))
-    assert summary["Risk_Level"] == "Very High"
+    assert summary["Tier"] == "High"
     assert summary["AI_Base_Level"] == "Medium"
     assert summary["Price_Escalated"]
-    assert "I2" in summary["Assessment"].split("Items at High or above")[1]
+    assert "I2" in summary["Assessment"].split("Items at High after the price step")[1]
 
 
 def test_welfare_carts_are_excluded_from_scope():
@@ -119,7 +127,7 @@ def test_screen_uses_cache_and_isolates_failures(tmp_path):
     assert sorted(calls) == ["BAD", "C1", "C2"]  # cached carts were not re-sent
     assert set(js.cached_results(it, ["C1", "C2", "BAD"], "m", cache)) == {"C1", "C2"}
     table = js.results_table(it, results)
-    assert set(table.columns) >= {"Cart_ID", "Display_Tier", "Risk_Level", "Assessment_Summary"}
+    assert set(table.columns) >= {"Cart_ID", "Tier", "Assessment_Summary"}
 
 
 def test_prompt_keeps_users_framework_and_moves_price_escalation_to_code():
@@ -130,9 +138,12 @@ def test_prompt_keeps_users_framework_and_moves_price_escalation_to_code():
     assert js.OUTPUT_SCHEMA["properties"]["items"]["items"]["properties"]["base_risk_level"]["enum"][-1] == "Uncertain"
 
 
-def test_prompt_v2_forbids_invented_purpose_and_grades_label_only_reasons():
+def test_prompt_v3_uses_three_levels_forbids_invented_purpose_and_grades_label_only_reasons():
     p = js.SYSTEM_PROMPT
-    assert js.PROMPT_VERSION == "justification-v2.0"
+    assert js.PROMPT_VERSION == "justification-v3.0"
+    assert "Very High" not in p and "Very Low" not in p
+    assert "most items should fit one of the three levels" in p
+    assert "specialised, costly or unusually large-quantity items, and items with no conceivable operational use -> High" in p
     assert "Do NOT invent or infer a purpose" in p
     assert "#refillforpantry" in p
     assert "everyday, low-cost consumables, office or pantry items -> Medium" in p
@@ -222,15 +233,23 @@ def test_combined_tier_applies_approval_minimum_over_ai():
     it = items_frame(peers(6) + [("C1", "Snacks", 10.0)])
     out = js.combined_tier(it, "C1", "Funded from approval of operations", record("C1", ["Low"]))
     assert out["AI_Level"] == "Low"
-    assert out["Level"] == "Medium" and out["Tier"] == "Medium"
+    assert out["Tier"] == "Medium"
     assert "minimum Medium (applied)" in out["Why"]
 
 
 def test_combined_tier_keeps_higher_ai_level_and_lists_price_driver():
     it = items_frame(peers(6) + [("C1", "Snacks", 999.0)])
     out = js.combined_tier(it, "C1", "QB2025", record("C1", ["Medium"]))
-    assert out["Level"] == "Very High" and out["Tier"] == "High"
-    assert "Vague reason" in out["Why"] and "above category max (+2)" in out["Why"]
+    assert out["Tier"] == "High" and out["AI_Level"] == "Medium"
+    assert "Vague reason" in out["Why"] and "AI rated Medium" in out["Why"]
+    assert "I1 above category max (+1)" in out["Why"]
+
+
+def test_top_ten_percent_is_noted_in_why_but_keeps_the_tier():
+    it = items_frame(peers(6) + [("C1", "Snacks", 14.9)])
+    out = js.combined_tier(it, "C1", "refill for pantry", record("C1", ["Low"]))
+    assert out["Tier"] == "Low"
+    assert "Price note: I1 in top 10% of category (no change)" in out["Why"]
 
 
 def test_combined_tier_without_ai_result_is_provisional():

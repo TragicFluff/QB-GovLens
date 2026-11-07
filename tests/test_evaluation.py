@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
-
 import pandas as pd
 
 from govlens import evaluation as ev
@@ -36,14 +34,15 @@ def test_agreement_counts_direction_of_disagreement():
     assert result["confusion"]["Medium"]["High"] == 1
 
 
-def test_skills_are_valid_and_the_justification_prompt_is_unchanged():
+def test_skills_are_valid_and_the_justification_skill_matches_the_prompt_version():
     skills = {s.name: s for s in list_skills()}
     assert set(skills) == {
         "govlens-case-qa", "govlens-case-report", "govlens-citations", "govlens-evidence-analysis",
         "govlens-guidance-research", "govlens-purchase-justification",
     }
     assert all(s.description and s.body and s.version for s in skills.values())
-    # The prompt moved into a skill file without changing a word, so cached AI results stay valid.
-    digest = hashlib.sha256(js.SYSTEM_PROMPT.strip().encode()).hexdigest()
-    assert digest == "aeaeac17da5ba29853ab4a5078d847396d339235addaff615387a641d8c910b4"
-    assert read_skill("govlens-purchase-justification").metadata["prompt-version"] == js.PROMPT_VERSION
+    # The app sends the skill body as the system prompt; its version tag must match, because
+    # the version is part of the cache key that decides which shipped AI results are valid.
+    skill = read_skill("govlens-purchase-justification")
+    assert js.SYSTEM_PROMPT == skill.body
+    assert skill.metadata["prompt-version"] == js.PROMPT_VERSION

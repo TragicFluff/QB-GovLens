@@ -44,7 +44,7 @@ st.markdown(
     "citations from official QB guidance (retrieval-augmented generation), and an **LLM judgement step** that "
     "rates purchase justification with cited guidance, bounded by deterministic price logic and a rule minimum. "
     "The instructions each model follows are kept as **skills** (SKILL.md files). Colour key in every "
-    "flowchart: blue = Python, purple = LLM or embeddings, yellow = administrator action, green = output."
+    "flowchart: QB blue = Python, purple = LLM or embeddings, orange = administrator action, green = output."
 )
 
 st.header("1. Overall data flow")
@@ -122,20 +122,24 @@ st.markdown(
     "built from the reason and product categories is embedded and matched against the knowledge base; "
     f"the top {js.GUIDANCE_PER_DOC['GG']} Governance Guide passages and top {js.GUIDANCE_PER_DOC['RS']} "
     "rule-spec passage are sent with the cart. The model judges each item's core function against the "
-    "stated reason (ignoring marketing themes but not luxury brand tier) and assigns a base level from Very "
-    "Low to Very High, or Uncertain. It must not invent a purpose the reason does not state: a reason with no "
-    "operational context is a documentation gap (Medium for everyday items, High for specialised or costly "
-    "items, Very High only for items with no conceivable use); agency purpose hashtags count as a stated "
-    "purpose. The response must match a strict JSON schema whose citation field only accepts the passages "
+    "stated reason (ignoring marketing themes but not luxury brand tier) and gives each item one of three "
+    "tiers: **High** (clear red flags that warrant investigation, including indefensible purchases), **Medium** "
+    "(a plausible basis but notable gaps in the justification) or **Low** (broadly appropriate), or Uncertain. "
+    "These are the same three tiers the screen shows, so the AI's wording always matches the tier. It must not "
+    "invent a purpose the reason does not state: a reason with no operational context is a documentation gap "
+    "(Medium for everyday items, High for specialised, costly or unusable items); agency purpose hashtags count "
+    "as a stated purpose. The response must match a strict JSON schema whose citation field only accepts the passages "
     "supplied; GovLens also rejects any assessment that cites nothing or cites an unknown passage. Carts with "
     "more than 25 items are sent in parts.\n\n"
-    "**Price escalation (Python; Guide p.24 price reasonableness).** Unit price after discount "
+    "**Price step (Python; Guide p.24 price reasonableness).** Unit price after discount "
     "(`Amount_After_Discount / Qty`) is compared with items from *other* carts in the same "
-    "`Product_Category` across all agencies. With more than 5 comparison records, an item between the "
-    "90th percentile and the maximum is escalated by one tier and an item above the maximum by two tiers, "
-    "capped at Very High. Price never lowers a level and Uncertain items are not escalated. Price bands "
-    "are deliberately **not** sent to the model, so the arithmetic is transparent and testable.\n\n"
-    "**Combining.** The cart takes its highest item level after price escalation, raised to Medium if the "
+    "`Product_Category` across all agencies. With more than 5 comparison records, an item that costs more "
+    "than every one of them moves up **one** tier (Low to Medium, or Medium to High). An item in the top 10% "
+    "(90th percentile to maximum) is noted in the *Why* column but keeps its tier: product categories are "
+    "broad marketplace labels, so that band often compares unlike goods (the cart detail lists the dearest "
+    "items each one is compared with). Price never lowers a tier and Uncertain items are not stepped. Price "
+    "positions are deliberately **not** sent to the model, so the arithmetic is transparent and testable.\n\n"
+    "**Combining.** The cart takes its highest item tier after the price step, raised to Medium if the "
     "reason has approval wording. Until a cart has an AI result its tier is provisional and rule-only "
     "(Medium for approval wording, Low for a vague reason). AI results for the masked sample are "
     "precomputed and shipped with the app (`scripts/precompute_ai_screen.py`), so viewers see them "
@@ -143,10 +147,17 @@ st.markdown(
 )
 st.dataframe(
     pd.DataFrame({
-        "Five-level result": ["Very High", "High", "Medium", "Low", "Very Low", "Uncertain"],
-        "Display tier": [js.DISPLAY_TIER[k] for k in ["Very High", "High", "Medium", "Low", "Very Low", "Uncertain"]],
+        "Tier": ["High", "Medium", "Low", "Uncertain"],
+        "Meaning": [
+            "Clear red flags that warrant investigation, up to purchases that could not be defended publicly",
+            "A plausible operational basis, but notable gaps in the justification or documentation",
+            "Broadly appropriate: item, reason and quantity fit, with at most minor gaps",
+            "The AI could not judge an item from the information given (not a tier; shown for review)",
+        ],
+        "Can price change it?": ["Already the highest tier", "Up to High if above the category maximum",
+                                 "Up to Medium if above the category maximum", "No"],
     }),
-    hide_index=True,
+    hide_index=True, use_container_width=True,
 )
 with st.expander("Purchase-justification prompt"):
     st.code(js.SYSTEM_PROMPT, language="text")

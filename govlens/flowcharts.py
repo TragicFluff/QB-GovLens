@@ -9,11 +9,11 @@ from __future__ import annotations
 
 _STYLE = """
   graph [bgcolor="white", rankdir=TB, fontname="Helvetica", fontsize=11, nodesep=0.35, ranksep=0.38, pad=0.3];
-  node  [fontname="Helvetica", fontsize=10.5, shape=box, style="rounded,filled", color="#5b6b7f", fillcolor="#e8f0fb", margin="0.16,0.07"];
+  node  [fontname="Helvetica", fontsize=10.5, shape=box, style="rounded,filled", color="#10069F", fillcolor="#E7E6F5", margin="0.16,0.07"];
   edge  [fontname="Helvetica", fontsize=9.5, color="#5b6b7f", fontcolor="#3a4656", arrowsize=0.7];
 """
 
-ADMIN = 'fillcolor="#fff4cc", color="#b08900"'
+ADMIN = 'fillcolor="#FCE8D8", color="#D9661A"'
 AI = 'fillcolor="#efe6fb", color="#7a4fb5"'
 OUT = 'fillcolor="#e3f5e8", color="#2f8a4b"'
 STORE = 'shape=cylinder, style=filled, fillcolor="#eef0f2", color="#6b7785"'
@@ -114,10 +114,10 @@ FLOW_UC2 = f"""digraph uc2 {{
   query [label="Retrieval query from reason + categories\\n→ embed → top 3 GG + top 1 RS passages"];
   vs [label="Local vector store", {STORE}];
   payload [label="Payload per cart: reason, pre-checks, items\\n(qty, prices; no price bands), guidance passages\\nchunks of ≤ 25 items"];
-  llm [label="gpt-4o-mini with the purchase-justification skill\\nno invented purpose · label-only reason = gap\\nBASE level per item · cites guidance\\nstrict JSON schema · temperature 0", {AI}];
+  llm [label="gpt-4o-mini with the purchase-justification skill\\nBASE tier per item: High / Medium / Low\\nno invented purpose · label-only reason = gap\\ncites guidance · strict JSON schema · temperature 0", {AI}];
   check [label="Validate: every item returned, allowed levels,\\ncitations only from supplied passages"];
   bands [label="Unit price after discount vs. OTHER carts' items\\nin the same Product_Category (all agencies)"];
-  esc [label="More than 5 records: 90th pct–max +1 tier,\\nabove max +2, cap Very High\\n→ cart level = highest item level"];
+  esc [label="More than 5 records and dearer than all of them:\\n+1 tier (cap High) · top 10%: noted only\\n→ cart tier = highest item tier"];
   floor [label="Combine: never below Medium\\nif approval wording found"];
   prov [label="Provisional rule-only tier\\napproval wording → Medium\\nvague → Low"];
   table [label="One row per cart: tier + Why\\n(reason check · AI summary · price)\\nfilters · CSV download", {OUT}];

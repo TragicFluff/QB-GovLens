@@ -61,10 +61,9 @@ def blind_order(case_ids: list[str], seed: int = 7) -> dict[str, list[str]]:
 def stratified_carts(table: pd.DataFrame, per_group: dict[str, int] | None = None, seed: int = 11) -> pd.DataFrame:
     """A small labelling sample across tiers and reason types (deterministic).
 
-    ``table`` needs Cart_ID, Tier, Level and Rule_Vague columns (from combined_tier).
+    ``table`` needs Cart_ID, Tier and Rule_Vague columns (from combined_tier).
     """
-    per_group = per_group or {"High": 3, "Medium (vague reason)": 2, "Medium (stated reason)": 3,
-                              "Medium (AI High)": 2, "Low": 2}
+    per_group = per_group or {"High": 4, "Medium (vague reason)": 3, "Medium (stated reason)": 3, "Low": 2}
     t = table.copy()
     same = [c for c in ("Reason_For_Purchase", "Cart_Item_Total") if c in t.columns]
     if same:  # identical carts (e.g. many 'QB2025' carts for the same item) would waste labels
@@ -73,7 +72,6 @@ def stratified_carts(table: pd.DataFrame, per_group: dict[str, int] | None = Non
     medium = t["Tier"] == "Medium"
     t.loc[medium & t["Rule_Vague"], "Group"] = "Medium (vague reason)"
     t.loc[medium & ~t["Rule_Vague"], "Group"] = "Medium (stated reason)"
-    t.loc[medium & (t["Level"] == "High"), "Group"] = "Medium (AI High)"
     picks = [
         t[t["Group"] == group].sample(n=min(n, int((t["Group"] == group).sum())), random_state=seed)
         for group, n in per_group.items()

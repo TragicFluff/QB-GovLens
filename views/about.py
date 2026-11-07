@@ -91,11 +91,11 @@ with uc1:
 with uc2:
     st.subheader("2. Purchase justification")
     st.markdown(
-        "Each cart gets **one tier** for whether its reason for purchase justifies what was bought. A rule "
-        "checks the reason text for vague wording and approval wording; an LLM, given that check and "
-        "retrieved guidance to cite, judges whether each item's core function fits the stated reason; and "
-        "GovLens raises the tier for items priced above the category's 90th percentile. A **Why** column "
-        "names what drove each tier, and approval wording always means at least Medium."
+        "Each cart gets **one tier, High, Medium or Low,** for whether its reason for purchase justifies what "
+        "was bought. An LLM, given retrieved guidance to cite, rates each item against the stated reason on "
+        "those same three tiers; GovLens raises an item one tier if it costs more than anything else bought "
+        "in its category; and a rule check of the reason text means approval wording is always at least "
+        "Medium. A **Why** column names what drove each tier."
     )
 
 st.header("Data sources")

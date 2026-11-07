@@ -9,8 +9,11 @@ Division of labour (keeps the AI's role reviewable):
     assessment that cites the retrieved Governance Guide / rule-spec passages.
   * Python does all arithmetic: unit price after discount, the item's price
     band within its Product_Category (other carts, all agencies), the
-    "more than 5 records" test, tier escalation (+1 / +2, capped at Very High),
-    the cart's highest tier, the rule minimum, and the display mapping.
+    "more than 5 records" test, the price step (+1 tier, only above the
+    category maximum, capped at High), the cart's highest tier and the rule minimum.
+
+There are three tiers from start to finish (Low, Medium, High, plus Uncertain when the
+AI cannot judge an item); what the AI says is what the screen shows, before any price step.
 
 The combined tier never enters the G2B / G2C rule queues, their tiers or counts.
 """
@@ -32,16 +35,12 @@ from .engine import classify_reason
 from .knowledge import APP_DIR, CACHE_DIR, CITATION_RE
 from .skills import read_skill
 
-PROMPT_VERSION = "justification-v2.0"
+PROMPT_VERSION = "justification-v3.0"
 BUNDLE_PATH = APP_DIR / "precomputed" / "ai_screen_results.json"
 GUIDANCE_PER_DOC = {"GG": 3, "RS": 1}
 APPROVAL_FLOOR = "Medium"  # minimum combined level when the reason contains approval wording
-LEVELS = ["Very Low", "Low", "Medium", "High", "Very High"]
+LEVELS = ["Low", "Medium", "High"]
 UNCERTAIN = "Uncertain"
-DISPLAY_TIER = {
-    "Very High": "High", "High": "Medium", "Medium": "Medium",
-    "Low": "Low", "Very Low": "Low", UNCERTAIN: "Uncertain",
-}
 BANDS = [
     "below first quantile",
     "between first quantile and median",
@@ -50,8 +49,11 @@ BANDS = [
     "between 90th percentile and maximum",
     "more than maximum",
 ]
-# +1 tier from the 90th percentile to the maximum, +2 above the maximum.
-BAND_ESCALATION = {BANDS[4]: 1, BANDS[5]: 2}
+# One step, and only for an item dearer than every comparison item in its category.
+# Items in the top 10% (90th percentile to maximum) are noted but keep their tier:
+# product categories are broad, so that band often compares unlike goods.
+BAND_ESCALATION = {BANDS[5]: 1}
+TOP_TEN_PERCENT = BANDS[4]
 MIN_RECORDS = 6          # "More than 5 records"
 MAX_ITEMS_PER_CALL = 25  # larger carts are assessed in chunks
 
@@ -470,30 +472,31 @@ def combine(items: pd.DataFrame, cart_id: str, record: dict[str, Any]) -> tuple[
                 f"max ${r['Peer_Max']:,.2f})"
             )
             if r["Escalated_By"]:
-                text += f"; escalated +{r['Escalated_By']} from base {r['AI_Base_Level']} to {r['Final_Level']}"
+                text += f"; above the category maximum, so raised one tier from {r['AI_Base_Level']} to {r['Final_Level']}"
             elif r["Price_Escalation"] and r["AI_Base_Level"] in LEVELS:
-                text += "; already at Very High, so escalation is capped"
+                text += "; above the category maximum, but already High"
+            elif r["Price_Band"] == TOP_TEN_PERCENT:
+                text += "; in the top 10% of its category (noted; does not change the tier)"
         else:
             text = (
                 f"{r['Item_Ref']} ({r['Product_Category'] or 'no category'}): only {r['Peer_Count']} comparison "
                 "records (5 or fewer), so the price step was not applied"
             )
         lines.append(text + ".")
-    high_items = rows[rows["Final_Level"].isin(["High", "Very High"])]["Item_Ref"].tolist()
+    high_items = rows[rows["Final_Level"] == "High"]["Item_Ref"].tolist()
     assessment = (
         f"AI base assessment ({record['model']}): {record['assessment']}\n\n"
         "Price working (computed by GovLens, not the AI):\n- " + "\n- ".join(lines)
     )
     if high_items:
-        assessment += f"\n\nItems at High or above after price escalation: {', '.join(high_items)}."
+        assessment += f"\n\nItems at High after the price step: {', '.join(high_items)}."
     summary = record["assessment_summary"]
     if cart_final != cart_base and cart_final in LEVELS:
-        summary = f"{summary} Escalated {cart_base} to {cart_final} on category price band."
+        summary = f"{summary} Raised {cart_base} to {cart_final}: an item costs more than any other in its category."
     total = float(rows["Amount_After_Discount"].sum())
     return {
         "Cart_ID": cart_id,
-        "Display_Tier": DISPLAY_TIER[cart_final],
-        "Risk_Level": cart_final,
+        "Tier": cart_final,
         "AI_Base_Level": cart_base,
         "Price_Escalated": cart_final != cart_base and cart_final in LEVELS,
         "Assessment_Summary": summary,
@@ -515,7 +518,7 @@ def combined_tier(items: pd.DataFrame, cart_id: str, reason: str, record: dict[s
                   in_scope: bool = True) -> dict[str, Any]:
     """One purchase-justification tier per cart, with the reasons that drove it.
 
-    combined level = the AI level after price escalation, but never below the rule
+    combined tier = the AI tier after the price step, but never below the rule
     minimum (Medium when the reason contains approval wording). Without an AI result,
     a provisional rule-only level is shown.
     """
@@ -525,7 +528,7 @@ def combined_tier(items: pd.DataFrame, cart_id: str, reason: str, record: dict[s
         "Approval_Wording": ", ".join(keywords), "AI_Level": "", "AI_Summary": "",
     }
     if not in_scope:
-        out.update(Level="", Tier=TIER_OPTIONS[5], Basis="Welfare purchase, not assessed", Why="#welfare purchase")
+        out.update(Tier=TIER_OPTIONS[5], Basis="Welfare purchase, not assessed", Why="#welfare purchase")
         return out
     floor = APPROVAL_FLOOR if offline else None
     drivers: list[str] = []
@@ -539,28 +542,32 @@ def combined_tier(items: pd.DataFrame, cart_id: str, reason: str, record: dict[s
         drivers.append("Not AI-screened")
     else:
         summary, rows = combine(items, cart_id, record)
-        ai_level = summary["Risk_Level"]
-        if ai_level in LEVELS:
-            level = LEVELS[max(_rank(ai_level), _rank(floor) if floor else -1)]
+        priced = summary["Tier"]          # AI tier after the price step
+        ai_level = summary["AI_Base_Level"]  # what the AI said
+        if priced in LEVELS:
+            level = LEVELS[max(_rank(priced), _rank(floor) if floor else -1)]
         else:
             level = floor or UNCERTAIN
         basis = "Rule check + AI + price bands"
         if offline:
-            raised = " (applied)" if level != ai_level else ""
+            raised = " (applied)" if level != priced else ""
             drivers.append(f"Approval wording ({', '.join(keywords)}): minimum {APPROVAL_FLOOR}{raised}")
         if vague:
             drivers.append("Vague reason")
-        drivers.append(f"AI: {record['assessment_summary']}")
-        price = []
-        for _, r in rows[rows["Escalated_By"] > 0].iterrows():
-            band = "above category max" if r["Price_Band"] == BANDS[5] else "90th pct to max"
-            price.append(f"{r['Item_Ref']} {band} (+{int(r['Escalated_By'])})")
-        if price:
-            drivers.append("Price: " + ", ".join(price[:3]) + (f" +{len(price) - 3} more" if len(price) > 3 else ""))
+        drivers.append(f"AI rated {ai_level}: {record['assessment_summary']}")
+
+        def listed(refs: list[str]) -> str:
+            return ", ".join(refs[:3]) + (f" +{len(refs) - 3} more" if len(refs) > 3 else "")
+
+        stepped = rows[rows["Escalated_By"] > 0]["Item_Ref"].tolist()
+        if stepped:
+            drivers.append(f"Price: {listed(stepped)} above category max (+1)")
+        noted = rows[(rows["Price_Band"] == TOP_TEN_PERCENT) & rows["More_Than_5_Records"]]["Item_Ref"].tolist()
+        if noted:
+            drivers.append(f"Price note: {listed(noted)} in top 10% of category (no change)")
         out.update(AI_Level=ai_level, AI_Summary=record["assessment_summary"])
     out.update(
-        Level=level, Tier=DISPLAY_TIER.get(level, "Not screened") if level else "Not screened",
-        Basis=basis, Why=" · ".join(drivers),
+        Tier=level or "Not screened", Basis=basis, Why=" · ".join(drivers),
     )
     return out
 
@@ -568,8 +575,7 @@ def combined_tier(items: pd.DataFrame, cart_id: str, reason: str, record: dict[s
 def results_table(items: pd.DataFrame, results: dict[str, dict]) -> pd.DataFrame:
     rows = [combine(items, cart_id, rec)[0] for cart_id, rec in results.items()]
     if not rows:
-        return pd.DataFrame(columns=["Cart_ID", "Display_Tier", "Risk_Level", "AI_Base_Level", "Assessment_Summary"])
+        return pd.DataFrame(columns=["Cart_ID", "Tier", "AI_Base_Level", "Assessment_Summary"])
     table = pd.DataFrame(rows)
-    table["_d"] = table["Display_Tier"].map(DISPLAY_ORDER)
-    table["_r"] = table["Risk_Level"].map(lambda v: -_rank(v))
-    return table.sort_values(["_d", "_r", "Cart_Item_Total"], ascending=[True, True, False]).drop(columns=["_d", "_r"]).reset_index(drop=True)
+    table["_d"] = table["Tier"].map(DISPLAY_ORDER)
+    return table.sort_values(["_d", "Cart_Item_Total"], ascending=[True, False]).drop(columns=["_d"]).reset_index(drop=True)

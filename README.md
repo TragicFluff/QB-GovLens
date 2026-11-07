@@ -49,6 +49,12 @@ Without a key the app still runs: retrieval falls back to keyword matching
 (labelled in the UI) and the AI features are switched off. Without CrewAI (for
 example on Python 3.14), case reviews use a single AI call instead of the crew.
 
+## Look and feel
+
+`.streamlit/config.toml` sets a dark theme in QuickBuy@SGov's colours (deep QB-blue sidebar,
+orange controls, light QB-blue links, Inter typeface). Charts switch to a matching dark palette
+(`govlens/charts.py`), so QB blue and orange stay readable on the dark page.
+
 ## Agent crew and skills
 
 `govlens/crew.py` builds the review crew and the follow-up Q&A agent. Their tools
@@ -133,22 +139,24 @@ shows which passages each rule retrieves, with scores.
 1. For each cart, a query built from the reason and product categories retrieves
    the top 3 Governance Guide and top 1 rule-spec passages (embeddings).
 2. The LLM receives the cart (reason, the REASON pre-checks, item descriptions,
-   categories, quantities, unit and total prices; **no price bands**) and the
-   passages, and returns strict JSON: per-item core function, base risk level
-   (Very Low ... Very High, or Uncertain) and rationale, an assessment that cites
-   the passages, a summary and the citation IDs. It must not invent a purpose the
-   reason does not state: label-only reasons are a documentation gap (Medium for
-   everyday items, High for specialised or costly items). Citations outside the
-   supplied passages are rejected. Carts with more than 25 items are sent in chunks.
-2. Python computes unit price after discount (`Amount_After_Discount / Qty`) and
+   categories, quantities, unit and total prices; **no price positions**) and the
+   passages, and returns strict JSON: per-item core function, tier (**High**: clear
+   red flags that warrant investigation; **Medium**: plausible but with justification
+   gaps; **Low**: broadly appropriate; or Uncertain) and rationale, an assessment that
+   cites the passages, a summary and the citation IDs. These are the same three tiers
+   the app shows. It must not invent a purpose the reason does not state: label-only
+   reasons are a documentation gap (Medium for everyday items, High for specialised or
+   costly items). Citations outside the supplied passages are rejected. Carts with
+   more than 25 items are sent in chunks.
+3. Python computes unit price after discount (`Amount_After_Discount / Qty`) and
    compares it with other carts' items in the same `Product_Category` across all
-   agencies. With more than 5 comparison records: 90th percentile to maximum = +1
-   tier, above maximum = +2, capped at Very High. Price never lowers a tier.
-3. The cart takes its highest item level after price escalation, raised to Medium
-   if the reason has approval wording. Display: Very High = High; High and Medium
-   = Medium; Low and Very Low = Low; Uncertain stays Uncertain. Carts without an AI
-   result show a provisional rule-only tier.
-4. AI results for the masked sample are **precomputed and shipped** in
+   agencies. With more than 5 comparison records, an item that costs more than all
+   of them moves up **one** tier (capped at High). Items in the top 10% are noted in
+   the Why column but keep their tier, because categories are broad. Price never
+   lowers a tier.
+4. The cart takes its highest item tier, raised to Medium if the reason has approval
+   wording. Carts without an AI result show a provisional rule-only tier.
+5. AI results for the masked sample are **precomputed and shipped** in
    `precomputed/ai_screen_results.json`, keyed by cart data, model and prompt
    version. Generate them locally with `python scripts/precompute_ai_screen.py`
    (needs `OPENAI_API_KEY` in `.env`), then commit and push the file. Re-run it
